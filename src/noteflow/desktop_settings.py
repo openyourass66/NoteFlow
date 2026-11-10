@@ -20,25 +20,44 @@ class Tools:
     soundfont: str = ""
 
 
-def _default_tools():
-    defaults = Tools()
+def _tool_directories() -> tuple[Path, ...]:
     if getattr(sys, "frozen", False):
-        return defaults
-    root = Path(__file__).resolve().parents[2] / ".tools"
-    ffmpeg = next(iter(sorted(root.glob("ffmpeg/*/bin/ffmpeg.exe"))), None)
-    ffprobe = next(iter(sorted(root.glob("ffmpeg/*/bin/ffprobe.exe"))), None)
-    synth = next(iter(sorted(root.glob("fluidsynth/*/bin/fluidsynth.exe"))), None)
-    soundfont = next(iter(sorted(root.glob("*.sf2"))), None)
-    return Tools(str(ffmpeg or defaults.ffmpeg), str(ffprobe or defaults.ffprobe),
-                 str(synth or defaults.fluidsynth), str(soundfont) if soundfont else "")
+        directory = Path(sys.executable).resolve().parent
+        workspace = next((parent for parent in directory.parents
+                          if (parent / "packaging" / "noteflow.spec").is_file()), None)
+        return (directory / "tools", workspace / ".tools") if workspace else (directory / "tools",)
+    return (Path(__file__).resolve().parents[2] / ".tools",)
+
+
+def _default_tools() -> Tools:
+    directories = _tool_directories()
+
+    def find(*patterns: str) -> str:
+        for directory in directories:
+            for pattern in patterns:
+                for path in sorted(directory.glob(pattern)):
+                    if path.is_file():
+                        return str(path)
+        return ""
+
+    return Tools(
+        find("ffmpeg.exe", "ffmpeg/bin/ffmpeg.exe", "ffmpeg/*/bin/ffmpeg.exe") or "ffmpeg",
+        find("ffprobe.exe", "ffmpeg/bin/ffprobe.exe", "ffmpeg/*/bin/ffprobe.exe") or "ffprobe",
+        find("fluidsynth.exe", "fluidsynth/bin/fluidsynth.exe", "fluidsynth/*/bin/fluidsynth.exe") or "fluidsynth",
+        find("*.sf2"),
+    )
 
 
 def load_tools(settings: QSettings) -> Tools:
     defaults = _default_tools()
-    return Tools(**{
-        name: os.environ.get(f"NOTEFLOW_{name.upper()}") or settings.value(f"tools/{name}", getattr(defaults, name), str)
-        for name in ("ffmpeg", "ffprobe", "fluidsynth", "soundfont")
-    })
+    values = {}
+    for name in ("ffmpeg", "ffprobe", "fluidsynth", "soundfont"):
+        fallback = getattr(defaults, name)
+        configured = settings.value(f"tools/{name}", fallback, str)
+        if name != "soundfont" and configured.lower() in ("", name, f"{name}.exe"):
+            configured = fallback
+        values[name] = os.environ.get(f"NOTEFLOW_{name.upper()}") or configured
+    return Tools(**values)
 
 
 def edit_tools(parent: QWidget, settings: QSettings, tools: Tools) -> Tools:

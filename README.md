@@ -4,7 +4,7 @@ NoteFlow 面向 Windows，将本地单声部旋律转换为数字简谱，并用
 
 ## 启动桌面版
 
-打开 `dist\NoteFlow\NoteFlow.exe`，并保留同目录的 `_internal`。首次运行可在「工具设置」填写 FFmpeg、ffprobe、FluidSynth 和本地 GM SoundFont（`.sf2`）的路径。FFmpeg 与 ffprobe 可从 `PATH` 查找。FluidSynth 和 SF2 用于试听。
+打开 `dist\NoteFlow\NoteFlow.exe`，并保留同目录的 `_internal`。在本项目内运行时，程序会自动查找 `.tools` 里的工具和音源。移到其他位置时，可把工具放在程序旁的 `tools` 文件夹、将可执行文件加入 `PATH`，或在「工具设置」中指定路径。FluidSynth 和本地 GM SoundFont（`.sf2`）用于试听。
 
 在已准备好 `.venv-m0` 和 `.tools` 的开发目录，可直接运行 `& .\.venv-m0\Scripts\python.exe -m noteflow`。源码启动会查找项目 `.tools` 中的本地工具。新环境使用 Python 3.11 x64，运行 `python -m pip install -c .\poc\requirements-win-x64.lock -e '.[desktop]'` 后用 `python -m noteflow` 启动。
 
