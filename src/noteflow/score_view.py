@@ -1,6 +1,6 @@
 """Draw numbered notation using the active Qt palette."""
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import QWidget
 
@@ -9,10 +9,12 @@ from .score import KEYS, Score, to_text
 
 class ScoreView(QWidget):
     MARGIN = 24
+    note_clicked = Signal(str)
 
     def __init__(self):
         super().__init__()
         self.score: Score | None = None
+        self.active_note = None
         self._reflow_timer = QTimer(self)
         self._reflow_timer.setSingleShot(True)
         self._reflow_timer.timeout.connect(self._reflow)
@@ -23,6 +25,19 @@ class ScoreView(QWidget):
         self.setAccessibleDescription(to_text(score) if score else "导入媒体后生成简谱")
         self._reflow_timer.start()
         self.update()
+
+    def set_active_note(self, note_id):
+        if self.active_note != note_id:
+            self.active_note = note_id
+            self.update()
+
+    def mousePressEvent(self, event):
+        if self.score:
+            for token, x, y, slot, count in self._layout()[0]:
+                if token.note_id and QRectF(x - slot / 2, y - 15, slot * count, 60).contains(event.position()):
+                    self.note_clicked.emit(token.note_id)
+                    break
+        super().mousePressEvent(event)
 
     def _notation_font(self):
         font = QFont(self.font())
@@ -72,7 +87,7 @@ class ScoreView(QWidget):
             return
 
         settings = self.score.settings
-        painter.drawText(self.MARGIN, 30, f"1={KEYS[settings.tonic_pc]}     4/4     ♩ = {settings.bpm:g}")
+        painter.drawText(self.MARGIN, 30, f"1={KEYS[settings.tonic_pc]}     4/4     BPM = {settings.bpm:g}")
         tokens, bars, _ = self._layout()
         for index, start, end, y in bars:
             painter.drawText(QPointF(start, y - 23), str(index))
@@ -80,6 +95,9 @@ class ScoreView(QWidget):
 
         painter.setFont(self._notation_font())
         for index, (token, x, y, slot, count) in enumerate(tokens):
+            if token.note_id and token.note_id == self.active_note:
+                painter.fillRect(QRectF(x - slot / 2, y - 9, slot * count, 51),
+                                 palette.color(QPalette.ColorRole.Highlight))
             symbol = f"{token.accidental}{token.degree}"
             painter.drawText(QRectF(x - slot / 2, y, slot, 28), Qt.AlignmentFlag.AlignCenter, symbol)
             for line in range(1, count):

@@ -38,7 +38,7 @@ def wait_for(app, condition, timeout=100):
 
 
 @pytest.fixture
-def window(app, tmp_path):
+def window(app, tmp_path, monkeypatch):
     import shutil
 
     tools = _default_tools()
@@ -46,6 +46,7 @@ def window(app, tmp_path):
         pytest.skip("Desktop tests require FFmpeg and ffprobe")
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     window = desktop.MainWindow(tmp_path, settings=settings, tools=tools)
+    monkeypatch.setattr(window, "_confirm_discard", lambda *args: True)
     window.show()
     yield window
     window.close()
@@ -124,6 +125,13 @@ def test_original_is_available_before_generation_without_soundfont(app, window, 
     assert window._playing == "原曲", window.status.text()
     wait_for(app, lambda: window._player and window._player.position() >= 150, timeout=10)
     original_path = window._preview_path
+    window.pause_button.click()
+    assert window._player.playbackState() == desktop.QMediaPlayer.PlaybackState.PausedState
+    window.timeline.setValue(1500)
+    window.seek()
+    assert window._player.position() == 1500
+    window.pause_button.click()
+    assert window._player.playbackState() == desktop.QMediaPlayer.PlaybackState.PlayingState
     window.stop_button.click()
     wait_for(app, lambda: not original_path.exists(), timeout=2)
     assert window._player is None and source.is_file()
@@ -162,9 +170,39 @@ def test_desktop_can_preview_stems_and_transcribe_only_vocals(app, window, tmp_p
     assert window.score is not None, window.status.text()
     assert [n.midi for n in window.score.melody] == [midi for _, _, midi in expected]
 
+    from PySide6.QtWidgets import QInputDialog
+    import wave
+
+    exported = tmp_path / "exported-vocals.wav"
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *a, **kw: ("人声", True))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (str(exported), ""))
+    window.export_audio()
+    wait_for(app, lambda: window._thread is None)
+    assert exported.read_bytes() == stems.vocals.read_bytes()
+    project = tmp_path / "stems.noteflow"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (str(project), ""))
+    # Real separation writes aligned stereo PCM stems.
+    for path in (stems.vocals, stems.accompaniment):
+        with wave.open(str(path), "rb") as wav:
+            samples = wav.readframes(wav.getnframes())
+        import numpy as np
+        mono = np.frombuffer(samples, dtype="<i2")
+        stereo = np.repeat(mono[:, None], 2, axis=1)
+        # Preserve the fixture's 22050 Hz signal while matching the stem format.
+        stereo = np.repeat(stereo, 2, axis=0)
+        with wave.open(str(path), "wb") as wav:
+            wav.setparams((2, 2, 44100, 0, "NONE", "not compressed"))
+            wav.writeframes(stereo.tobytes())
+    window.save_project()
+    wait_for(app, lambda: window._thread is None)
+    window.open_source(project)
+    wait_for(app, lambda: window._thread is None)
+    assert window.stems is not None and window.stems.vocals.exists(), window.status.text()
+    assert window._analysis_vocals and window.source_mode.currentIndex() == 1
+    restored = window.stems
     window.open_source(source)
     wait_for(app, lambda: window._thread is None)
-    assert not window.vocals_button.isEnabled() and not stems.vocals.exists()
+    assert not window.vocals_button.isEnabled() and not restored.vocals.exists()
 
 
 def test_desktop_cancellation_and_source_changes_discard_late_results(app, window, tmp_path, monkeypatch):
@@ -201,3 +239,76 @@ def test_desktop_cancellation_and_source_changes_discard_late_results(app, windo
     window.close()
     wait_for(app, lambda: window._thread is None and not window.isVisible())
     assert not workspace.exists()
+
+
+def test_project_restores_edited_notes_and_audio_after_original_is_removed(app, window, tmp_path, monkeypatch):
+    source, project = tmp_path / "original.wav", tmp_path / "portable.noteflow"
+    write_wave(source, 10, melody())
+    window.open_source(source)
+    wait_for(app, lambda: window._thread is None)
+    window.generate()
+    wait_for(app, lambda: window._thread is None)
+    original = window.score.melody
+    from PySide6.QtCore import QItemSelectionModel
+
+    window.note_table.selectionModel().select(
+        window.note_table.model().index(0, 2),
+        QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+    )
+    assert window.note_table.currentRow() == -1
+    window.transpose_note(12)
+    assert window.score.melody[0].midi == original[0].midi + 12
+    window.undo()
+    assert window.score.melody == original
+    window.redo()
+    edited = window.score.melody
+    assert edited[0].midi == original[0].midi + 12
+    window.note_table.item(0, 0).setText("-1")
+    assert window.score.melody == edited
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (str(project), ""))
+    window.save_project()
+    wait_for(app, lambda: window._thread is None)
+    assert project.is_file() and not window._dirty, window.status.text()
+    source.unlink()
+    window.open_source(project)
+    wait_for(app, lambda: window._thread is None)
+    assert window.project_path == project and window.media.path.is_file(), window.status.text()
+    assert window.score.melody == edited and not window._dirty
+    assert window.recent.count() == 1
+    window.bpm.setValue(100)
+    window.apply_calibration()
+    wait_for(app, lambda: window._thread is None)
+    assert window.score.melody == edited
+    assert window.score.settings.bpm == 100
+
+
+def test_broken_project_preserves_current_work(app, window, tmp_path):
+    source = tmp_path / "existing.wav"
+    write_wave(source, 1, [(0, .5, 60)])
+    window.open_source(source)
+    wait_for(app, lambda: window._thread is None)
+    previous = window.media
+    broken = tmp_path / "broken.noteflow"
+    broken.write_bytes(b"broken")
+    window.open_source(broken)
+    wait_for(app, lambda: window._thread is None)
+    assert window.media is previous and window._loading_workspace is None
+
+
+def test_save_then_close_waits_for_project_write(app, window, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    source, project = tmp_path / "save.wav", tmp_path / "saved.noteflow"
+    write_wave(source, 1, [(0, .5, 60)])
+    window.open_source(source)
+    wait_for(app, lambda: window._thread is None)
+    window._mark_dirty()
+    monkeypatch.setattr(window, "_confirm_discard", desktop.MainWindow._confirm_discard.__get__(window))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.StandardButton.Cancel)
+    window.close()
+    assert window.isVisible() and window.media
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.StandardButton.Save)
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (str(project), ""))
+    window.close()
+    wait_for(app, lambda: window._thread is None and not window.isVisible())
+    assert project.is_file()
