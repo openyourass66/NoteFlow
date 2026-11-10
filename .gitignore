@@ -1,0 +1,12 @@
+/.venv*/
+/.tools/
+/.poc-output/
+/build/
+/dist/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+*.sf2
+*.wav
+*.mp3
+*.mp4
