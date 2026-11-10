@@ -23,7 +23,7 @@ from .analysis import analyze_media
 from .desktop_settings import Tools, edit_tools, load_tools
 from .errors import NoteFlowError
 from .export import PROGRAMS, export_score
-from .media import probe
+from .media import MEDIA_SUFFIXES, probe
 from .process import Cancelled, check_cancelled
 from .score import BPM_MAX, BPM_MIN, KEYS, ScoreSettings, build_score, rekey
 from .score_view import ScoreView
@@ -34,11 +34,12 @@ LOG = logging.getLogger("noteflow")
 
 class Job(QObject):
     progress = Signal(str)
-    finished = Signal(object)
+    finished = Signal()
 
     def __init__(self, operation, cancel):
         super().__init__()
         self.operation, self.cancel = operation, cancel
+        self.outcome = None
 
     @Slot()
     def run(self):
@@ -53,7 +54,8 @@ class Job(QObject):
             LOG.error("Unexpected worker error: %s", type(error).__name__)
             outcome = (None, NoteFlowError("UNEXPECTED", "worker", "任务失败，请重试。"))
         LOG.info("Worker finished in %.2f s", perf_counter() - start)
-        self.finished.emit(outcome)
+        self.outcome = outcome
+        self.finished.emit()
 
 
 def cache_directory() -> Path:
@@ -72,7 +74,7 @@ class MainWindow(QMainWindow):
         self.workdir = Path(self.workspace.name)
         self.media = self.analysis = self.score = None
         self._revision = 0
-        self._thread = self._worker = self._cancel = self._outcome = self._callback = None
+        self._thread = self._worker = self._cancel = self._callback = None
         self._pending_source = None
         self._closing = False
         self._preview_path = self._player = None
@@ -214,13 +216,11 @@ class MainWindow(QMainWindow):
             return
         self._cancel = Event()
         self._callback = callback
-        self._outcome = None
         self._thread = QThread(self)
         self._worker = Job(operation, self._cancel)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._job_progress)
-        self._worker.finished.connect(self._record_outcome)
         self._worker.finished.connect(self._thread.quit)
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._finish_job)
@@ -229,17 +229,15 @@ class MainWindow(QMainWindow):
         self._sync_controls()
         self._thread.start()
 
-    @Slot(object)
-    def _record_outcome(self, outcome):
-        self._outcome = outcome
-
     @Slot()
     def _finish_job(self):
+        # QThread emits finished before its native thread-local cleanup is complete.
+        self._thread.wait()
         cancelled = self._cancel.is_set()
         callback = self._callback
-        value, error = self._outcome or (None, NoteFlowError("UNEXPECTED", "worker", "后台任务中断。"))
+        value, error = self._worker.outcome or (None, NoteFlowError("UNEXPECTED", "worker", "后台任务中断。"))
         self._thread.deleteLater()
-        self._thread = self._worker = self._cancel = self._outcome = self._callback = None
+        self._thread = self._worker = self._cancel = self._callback = None
         if self._closing:
             self.close()
             return
@@ -268,7 +266,8 @@ class MainWindow(QMainWindow):
         self.tools = edit_tools(self, self.settings, self.tools)
 
     def choose_source(self):
-        selected, _ = QFileDialog.getOpenFileName(self, "选择本地媒体", "", "媒体文件 (*.wav *.mp3 *.mp4)")
+        patterns = " ".join(f"*{suffix}" for suffix in MEDIA_SUFFIXES)
+        selected, _ = QFileDialog.getOpenFileName(self, "选择本地媒体", "", f"媒体文件 ({patterns})")
         if selected:
             self.open_source(Path(selected))
 

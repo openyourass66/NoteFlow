@@ -1,6 +1,6 @@
 """Draw numbered notation using the active Qt palette."""
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QFont, QFontMetrics, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import QWidget
 
@@ -13,12 +13,15 @@ class ScoreView(QWidget):
     def __init__(self):
         super().__init__()
         self.score: Score | None = None
+        self._reflow_timer = QTimer(self)
+        self._reflow_timer.setSingleShot(True)
+        self._reflow_timer.timeout.connect(self._reflow)
         self.setAccessibleName("数字简谱")
 
     def set_score(self, score: Score | None):
         self.score = score
         self.setAccessibleDescription(to_text(score) if score else "导入媒体后生成简谱")
-        self._reflow()
+        self._reflow_timer.start()
         self.update()
 
     def _notation_font(self):
@@ -54,7 +57,8 @@ class ScoreView(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._reflow()
+        if event.oldSize().width() != event.size().width():
+            self._reflow_timer.start()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -64,7 +68,7 @@ class ScoreView(QWidget):
         text = palette.color(QPalette.ColorRole.Text)
         painter.setPen(text)
         if not self.score:
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "打开或拖入 WAV、MP3、MP4，再点击生成简谱")
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "打开或拖入 WAV、MP3、MP4、M4A，再点击生成简谱")
             return
 
         settings = self.score.settings

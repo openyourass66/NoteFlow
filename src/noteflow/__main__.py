@@ -14,7 +14,7 @@ from .errors import NoteFlowError
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="noteflow", description="识别本地音频或视频中的音符。")
-    parser.add_argument("source", type=Path, help="PCM WAV、MP3 或含 AAC 音轨的 MP4")
+    parser.add_argument("source", type=Path, help="PCM WAV、MP3 或含 AAC 音轨的 MP4 / M4A")
     parser.add_argument("--ffmpeg", default="ffmpeg", help="FFmpeg 路径，默认从 PATH 查找")
     parser.add_argument("--ffprobe", default="ffprobe", help="ffprobe 路径，默认从 PATH 查找")
     args = parser.parse_args(argv)

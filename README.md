@@ -8,7 +8,7 @@ NoteFlow 面向 Windows，将本地单声部旋律转换为数字简谱，并用
 
 在已准备好 `.venv-m0` 和 `.tools` 的开发目录，可直接运行 `& .\.venv-m0\Scripts\python.exe -m noteflow`。源码启动会查找项目 `.tools` 中的本地工具。新环境使用 Python 3.11 x64，运行 `python -m pip install -c .\poc\requirements-win-x64.lock -e '.[desktop]'` 后用 `python -m noteflow` 启动。
 
-1. 打开或拖入 PCM WAV、MP3 或含 AAC 音轨的 MP4，然后点击「生成简谱」。
+1. 打开或拖入 PCM WAV、MP3 或含 AAC 音轨的 MP4 / M4A，然后点击「生成简谱」。程序按文件内容识别受支持的容器，扩展名误标为 `.mp3` 的 M4A 可直接导入。
 2. 查看谱面，需要时修改 BPM、首拍偏移或主音，再点击「应用校准」。
 3. 选择钢琴、尼龙吉他或小提琴进行试听，或导出 UTF-8 TXT 和 MIDI。
 

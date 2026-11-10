@@ -13,7 +13,8 @@ from .process import check_cancelled, run_tool
 SAMPLE_RATE = 22050
 MAX_SECONDS = 120
 MAX_BYTES = 200_000_000
-FORMATS = {".wav": ("wav", "pcm_"), ".mp3": ("mp3", "mp3"), ".mp4": ("mov", "aac")}
+FORMATS = {"wav": "pcm_", "mp3": "mp3", "mov": "aac"}
+MEDIA_SUFFIXES = (".wav", ".mp3", ".mp4", ".m4a")
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +22,7 @@ class MediaInfo:
     path: Path
     stream_index: int
     codec: str
+    demuxer: str
     duration_s: float | None = None
 
 
@@ -52,20 +54,23 @@ def probe(path: Path, ffprobe: str = "ffprobe", *, cancel: Event | None = None) 
             size = path.stat().st_size
     except (OSError, RuntimeError) as exc:
         raise NoteFlowError("INPUT_UNREADABLE", "probe", "无法打开输入文件。") from exc
-    media_format = FORMATS.get(path.suffix.lower())
-    if media_format is None:
-        raise NoteFlowError("UNSUPPORTED_MEDIA", "probe", "请选择 PCM WAV、MP3 或含 AAC 音轨的 MP4。")
+    if path.suffix.lower() not in MEDIA_SUFFIXES:
+        raise NoteFlowError("UNSUPPORTED_MEDIA", "probe", "请选择 PCM WAV、MP3 或含 AAC 音轨的 MP4 / M4A。")
     if size > MAX_BYTES:
         raise NoteFlowError("INPUT_LIMIT", "probe", "文件超过 200 MB，请截取片段后重试。")
 
-    demuxer, expected_codec = media_format
     output = run_tool(ffprobe, "probe", 15, (
-        "-v", "error", "-protocol_whitelist", "file", "-f", demuxer,
-        "-show_entries", "stream=index,codec_type,codec_name,duration:format=duration",
+        "-v", "error", "-protocol_whitelist", "file", "-format_whitelist", ",".join(FORMATS),
+        "-show_entries", "stream=index,codec_type,codec_name,duration:format=format_name,duration",
         "-of", "json", "-i", str(path),
     ), cancel)
     try:
         metadata = json.loads(output)
+        container = metadata["format"]
+        names = container["format_name"].split(",")
+        demuxer = next((name for name in names if name in FORMATS), None)
+        if demuxer is None:
+            raise NoteFlowError("UNSUPPORTED_MEDIA", "probe", "文件的实际容器格式不受支持。")
         track = next((stream for stream in metadata.get("streams", ()) if stream.get("codec_type") == "audio"), None)
         if track is None:
             raise NoteFlowError("NO_AUDIO", "probe", "文件没有音轨，请选择包含音频的文件。")
@@ -75,24 +80,24 @@ def probe(path: Path, ffprobe: str = "ffprobe", *, cancel: Event | None = None) 
         duration = _known_duration(track.get("duration"))
         # Container duration is a usable fallback for audio-only files.
         if duration is None and demuxer != "mov":
-            duration = _known_duration(metadata.get("format", {}).get("duration"))
+            duration = _known_duration(container.get("duration"))
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise NoteFlowError("DECODE_FAILED", "probe", "媒体探测返回了无效的音轨信息。") from exc
 
+    expected_codec = FORMATS[demuxer]
     supported = codec.startswith(expected_codec) if demuxer == "wav" else codec == expected_codec
     if not supported:
         raise NoteFlowError("UNSUPPORTED_MEDIA", "probe", "首条音轨的编码不受支持。")
     if duration is not None:
         _check_duration(duration, "probe")
-    return MediaInfo(path, index, codec, duration)
+    return MediaInfo(path, index, codec, demuxer, duration)
 
 
 def normalize(info: MediaInfo, workdir: Path, ffmpeg: str = "ffmpeg", *, cancel: Event | None = None) -> AudioAsset:
     wav_path = workdir / "analysis.wav"
-    demuxer = FORMATS[info.path.suffix.lower()][0]
     run_tool(ffmpeg, "decode", 90, (
         "-nostdin", "-v", "error", "-xerror", "-protocol_whitelist", "file",
-        "-f", demuxer, "-i", str(info.path), "-map", f"0:{info.stream_index}", "-vn", "-sn", "-dn",
+        "-f", info.demuxer, "-i", str(info.path), "-map", f"0:{info.stream_index}", "-vn", "-sn", "-dn",
         "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", "-t", str(MAX_SECONDS + 1), str(wav_path),
     ), cancel)
     try:

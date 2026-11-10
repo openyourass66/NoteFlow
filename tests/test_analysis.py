@@ -25,6 +25,8 @@ def samples(tmp_path_factory, tools):
     wav = root / "自制样本.wav"
     mp3 = wav.with_suffix(".mp3")
     mp4 = wav.with_suffix(".mp4")
+    m4a = wav.with_suffix(".m4a")
+    mislabeled = root / "实际为 AAC 的文件.mp3"
     video_only = root / "video-only.mp4"
     corrupt = root / "corrupt.wav"
     long_audio = root / "long.wav"
@@ -40,16 +42,19 @@ def samples(tmp_path_factory, tools):
     write_wave(boundary, 120)
     corrupt.write_bytes(b"not a WAV file")
     ffmpeg("-i", str(wav), "-c:a", "libmp3lame", str(mp3))
+    ffmpeg("-i", str(wav), "-c:a", "aac", str(m4a))
+    shutil.copyfile(m4a, mislabeled)
     ffmpeg("-f", "lavfi", "-i", "color=s=160x90:r=10", "-i", str(wav), "-i", str(silence),
            "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "mpeg4", "-c:a", "aac",
            "-t", "10", str(mp4))
     ffmpeg("-f", "lavfi", "-i", "color=s=160x90:r=10", "-t", "1", "-c:v", "mpeg4", str(video_only))
-    return {"wav": wav, "mp3": mp3, "mp4": mp4, "no_audio": video_only, "corrupt": corrupt,
-            "long": long_audio, "boundary": boundary, "silence": silence}
+    return {"wav": wav, "mp3": mp3, "mp4": mp4, "m4a": m4a, "aac_named_mp3": mislabeled,
+            "no_audio": video_only, "corrupt": corrupt, "long": long_audio, "boundary": boundary, "silence": silence}
 
 
 @pytest.mark.parametrize(("kind", "index", "codec"), [
     ("wav", 0, "pcm_s16le"), ("mp3", 0, "mp3"), ("mp4", 1, "aac"),
+    ("m4a", 0, "aac"), ("aac_named_mp3", 0, "aac"),
 ])
 def test_formats_transcribe_the_same_melody(samples, tools, kind, index, codec):
     result = analysis.analyze(samples[kind], **tools)
@@ -89,7 +94,7 @@ def test_exact_length_limit(samples, tools, tmp_path):
 
 
 def test_decode_checks_length_when_probe_duration_was_unknown(samples, tools, tmp_path):
-    info = media.MediaInfo(samples["long"], 0, "pcm_s16le")
+    info = media.MediaInfo(samples["long"], 0, "pcm_s16le", "wav")
     with pytest.raises(NoteFlowError) as error:
         media.normalize(info, tmp_path, tools["ffmpeg"])
     assert (error.value.code, error.value.stage) == ("INPUT_LIMIT", "decode")
