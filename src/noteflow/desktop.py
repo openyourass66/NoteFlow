@@ -23,7 +23,7 @@ from .analysis import analyze_media
 from .desktop_settings import Tools, edit_tools, load_tools
 from .errors import NoteFlowError
 from .export import PROGRAMS, export_score
-from .media import MEDIA_SUFFIXES, probe
+from .media import MEDIA_SUFFIXES, decode_original, probe
 from .process import Cancelled, check_cancelled
 from .score import BPM_MAX, BPM_MIN, KEYS, ScoreSettings, build_score, rekey
 from .score_view import ScoreView
@@ -77,7 +77,7 @@ class MainWindow(QMainWindow):
         self._thread = self._worker = self._cancel = self._callback = None
         self._pending_source = None
         self._closing = False
-        self._preview_path = self._player = None
+        self._preview_path = self._player = self._playing = None
         self._audio = QAudioOutput(self)
         self._audio.setVolume(0.65)
         self.setWindowTitle("NoteFlow · 旋律简谱")
@@ -108,6 +108,8 @@ class MainWindow(QMainWindow):
         self.generate_button = self._button(toolbar, "生成简谱", self.generate)
         self.cancel_button = self._button(toolbar, "取消任务", self.cancel_job)
         toolbar.addStretch()
+        self.txt_button = self._button(toolbar, "导出 TXT…", lambda: self.export(False))
+        self.midi_button = self._button(toolbar, "导出 MIDI…", lambda: self.export(True))
         self.settings_button = self._button(toolbar, "工具设置…", self.configure_tools)
 
         self.source_label = QLabel("尚未导入媒体")
@@ -144,15 +146,16 @@ class MainWindow(QMainWindow):
 
         actions = QHBoxLayout()
         layout.addLayout(actions)
+        self.original_button = self._button(actions, "播放原曲", self.play_original)
         self.instrument = QComboBox()
         self.instrument.addItems(PROGRAMS)
         self._field(actions, "音色", self.instrument)
-        self.play_button = self._button(actions, "播放", self.play)
+        self.melody_button = self._button(actions, "试听旋律", lambda: self.play(original_timing=True))
+        self.melody_button.setToolTip("使用识别出的主旋律，按原始音符时间试听")
+        self.play_button = self._button(actions, "播放简谱", self.play)
         self.stop_button = self._button(actions, "停止", self.stop_playback)
         self.instrument.currentIndexChanged.connect(self._change_instrument)
         actions.addStretch()
-        self.txt_button = self._button(actions, "导出 TXT…", lambda: self.export(False))
-        self.midi_button = self._button(actions, "导出 MIDI…", lambda: self.export(True))
 
         feedback = QHBoxLayout()
         layout.addLayout(feedback)
@@ -196,9 +199,10 @@ class MainWindow(QMainWindow):
         self.open_button.setEnabled(not self._closing)
         self.settings_button.setEnabled(not busy)
         self.generate_button.setEnabled(not busy and self.media is not None)
+        self.original_button.setEnabled(not busy and self.media is not None)
         self.cancel_button.setEnabled(busy and not self._cancel.is_set())
         for control in (self.bpm, self.offset, self.key, self.apply_button,
-                        self.instrument, self.play_button, self.txt_button, self.midi_button):
+                        self.instrument, self.melody_button, self.play_button, self.txt_button, self.midi_button):
             control.setEnabled(ready and not busy)
         self.stop_button.setEnabled(self._player is not None)
         self.progress.setVisible(busy)
@@ -297,7 +301,7 @@ class MainWindow(QMainWindow):
     def _imported(self, media):
         self.media = media
         self._show_media(media.duration_s)
-        self._status("音轨已就绪，点击生成简谱。")
+        self._status("音轨已就绪，可以播放原曲或生成简谱。")
 
     def _show_media(self, duration):
         length = f"{duration:.2f} 秒" if duration is not None else "时长待解码确认"
@@ -355,7 +359,17 @@ class MainWindow(QMainWindow):
 
         self._start("正在应用校准…", rebuild, self._publish_score)
 
-    def play(self):
+    def play_original(self):
+        if self.media is None or self._thread is not None:
+            return
+        self._stop_player()
+        media, ffmpeg = self.media, self.tools.ffmpeg
+        target = self.workdir / f"original-{uuid4().hex}.wav"
+        self._preview_path = target
+        self._start("正在准备原曲音轨…", lambda cancel, _: decode_original(media, target, ffmpeg, cancel),
+                    lambda path: self._play_rendered(path, "原曲"))
+
+    def play(self, *, original_timing=False):
         if self.score is None or self._thread is not None:
             return
         self._stop_player()
@@ -367,16 +381,19 @@ class MainWindow(QMainWindow):
         synth, soundfont = self.tools.fluidsynth, Path(self.tools.soundfont).resolve()
         target = self.workdir / f"preview-{uuid4().hex}.wav"
         self._preview_path = target
-        self._start("正在渲染试听…", lambda cancel, _: render_preview(score, program, soundfont, target, synth, cancel),
-                    self._play_rendered)
+        label = "旋律" if original_timing else "简谱"
+        self._start(f"正在渲染{label}…", lambda cancel, _: render_preview(
+            score, program, soundfont, target, synth, cancel, original_timing=original_timing),
+            lambda path: self._play_rendered(path, label))
 
-    def _play_rendered(self, path):
+    def _play_rendered(self, path, label):
         player = QMediaPlayer(self)
         self._player = player
+        self._playing = label
         player.setAudioOutput(self._audio)
         player.errorOccurred.connect(lambda _code, _detail: self._playback_done(player, failed=True))
         player.mediaStatusChanged.connect(lambda state: self._playback_done(player) if state == QMediaPlayer.MediaStatus.EndOfMedia else None)
-        self._status("正在播放试听…")
+        self._status(f"正在播放{label}…")
         player.setSource(QUrl.fromLocalFile(str(path)))
         if self._player is player:
             player.play()
@@ -394,11 +411,12 @@ class MainWindow(QMainWindow):
         self._sync_controls()
 
     def _change_instrument(self):
-        if self._player is not None:
-            self.play()
+        if self._playing in ("旋律", "简谱"):
+            self.play(original_timing=self._playing == "旋律")
 
     def _stop_player(self):
         player, self._player = self._player, None
+        self._playing = None
         if player is not None:
             player.stop()
             player.setSource(QUrl())

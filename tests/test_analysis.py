@@ -1,12 +1,15 @@
 import json
 import shutil
 import subprocess
+import wave
+from threading import Event
 
 import pytest
 
 from noteflow import analysis, media, transcription
 from noteflow.__main__ import main
 from noteflow.errors import NoteFlowError
+from noteflow.score import ScoreSettings, build_score
 from poc.fixtures import melody, write_wave
 
 
@@ -64,6 +67,33 @@ def test_formats_transcribe_the_same_melody(samples, tools, kind, index, codec):
     assert [note.midi for note in result.notes] == [pitch for _, _, pitch in melody()]
     for note, (expected_start, _, _) in zip(result.notes, melody()):
         assert note.start_s == pytest.approx(expected_start, abs=0.05)
+
+
+@pytest.mark.parametrize("kind", ["wav", "mp3", "mp4", "m4a", "aac_named_mp3"])
+def test_original_playback_decodes_first_track(samples, tools, kind, tmp_path):
+    source = samples[kind]
+    info = media.probe(source, tools["ffprobe"])
+    target = tmp_path / "original.wav"
+    assert media.decode_original(info, target, tools["ffmpeg"], Event()) == target
+    with wave.open(str(target), "rb") as wav:
+        assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (2, 2, 48000)
+        assert wav.getnframes() / wav.getframerate() == pytest.approx(10, abs=0.05)
+        assert any(wav.readframes(48000))  # The second MP4 track is silent.
+
+
+def test_transcribed_melody_survives_louder_sustained_accompaniment(tmp_path, tools):
+    lead, bass, mixed = (tmp_path / name for name in ("lead.wav", "bass.wav", "mixed.wav"))
+    expected = melody()
+    write_wave(lead, 9, expected)
+    write_wave(bass, 9, [(0, 9, 43)])
+    subprocess.run([tools["ffmpeg"], "-nostdin", "-v", "error", "-i", str(lead), "-i", str(bass),
+                    "-filter_complex", "amix=inputs=2:weights='0.85 1.15':normalize=0", str(mixed)],
+                   check=True, timeout=30)
+    analysis_result = analysis.analyze(mixed, **tools)
+    assert any(n.midi == 43 for n in analysis_result.notes)
+    score = build_score(analysis_result.notes, ScoreSettings(bpm=80))
+    assert [n.midi for n in score.grid.notes] == [pitch for _, _, pitch in expected]
+    assert [n.start_s for n in score.melody] == pytest.approx([start for start, _, _ in expected], abs=0.05)
 
 
 @pytest.mark.parametrize(("kind", "code", "stage"), [

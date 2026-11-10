@@ -43,7 +43,7 @@ def _has_preset(path: Path, program: int) -> bool:
 
 def render_preview(
     score: Score, program: int, soundfont: Path, target: Path, fluidsynth: str,
-    cancel: Event,
+    cancel: Event, *, original_timing: bool = False,
 ) -> Path:
     check_cancelled(cancel)
     try:
@@ -56,7 +56,7 @@ def render_preview(
     try:
         with TemporaryDirectory(prefix="midi-", dir=target.parent) as directory:
             midi_path = Path(directory) / "preview.mid"
-            write_midi(score, program, midi_path)
+            write_midi(score, program, midi_path, original_timing=original_timing)
             run_tool(fluidsynth, "render", 90, (
                 "-ni", "-r", "44100", "-T", "wav", "-F", str(target), str(soundfont), str(midi_path),
             ), cancel)

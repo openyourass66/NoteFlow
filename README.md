@@ -8,9 +8,9 @@ NoteFlow 面向 Windows，将本地单声部旋律转换为数字简谱，并用
 
 在已准备好 `.venv-m0` 和 `.tools` 的开发目录，可直接运行 `& .\.venv-m0\Scripts\python.exe -m noteflow`。源码启动会查找项目 `.tools` 中的本地工具。新环境使用 Python 3.11 x64，运行 `python -m pip install -c .\poc\requirements-win-x64.lock -e '.[desktop]'` 后用 `python -m noteflow` 启动。
 
-1. 打开或拖入 PCM WAV、MP3 或含 AAC 音轨的 MP4 / M4A，然后点击「生成简谱」。程序按文件内容识别受支持的容器，扩展名误标为 `.mp3` 的 M4A 可直接导入。
+1. 打开或拖入 PCM WAV、MP3 或含 AAC 音轨的 MP4 / M4A。导入后可点击「播放原曲」听首条音轨，再点击「生成简谱」。扩展名误标为 `.mp3` 的 M4A 可直接导入。
 2. 查看谱面，需要时修改 BPM、首拍偏移或主音，再点击「应用校准」。
-3. 选择钢琴、尼龙吉他或小提琴进行试听，或导出 UTF-8 TXT 和 MIDI。
+3. 选择钢琴、尼龙吉他或小提琴。「试听旋律」保留识别音符的起止时间，「播放简谱」按谱面节奏播放。可导出当前简谱的 UTF-8 TXT 和 MIDI。
 
 首版适合清晰的单声部旋律，采用固定 4/4 拍和恒定速度。单文件上限为 200 MB，首条音轨上限为 120 秒。长时间识别时可取消，取消会等当前推理返回再释放工作目录。
 
@@ -36,7 +36,7 @@ $nfFfmpeg = '.\.tools\ffmpeg\ffmpeg-9.0.2-essentials_build\bin'
 
 ## 开发与打包
 
-媒体探测、识别、节奏和制谱使用普通函数与数据类。Qt 窗口一次运行一个后台任务。制谱、试听与导出共用同一份 `Score`，校准复用识别结果。
+媒体探测、识别、节奏和制谱使用普通函数与数据类。Qt 窗口一次运行一个后台任务。`Score` 同时保留按时间筛出的旋律和量化后的谱面，校准复用识别结果。
 
 完整回归需安装 `.[desktop,test]`，将 FFmpeg 和 ffprobe 加入 `PATH` 后运行 `python -m pytest`。本机有 FluidSynth、SF2 和音频输出设备时，桌面回归也会验证三种音色的播放与停止。
 

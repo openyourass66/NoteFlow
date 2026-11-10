@@ -93,13 +93,32 @@ def probe(path: Path, ffprobe: str = "ffprobe", *, cancel: Event | None = None) 
     return MediaInfo(path, index, codec, demuxer, duration)
 
 
-def normalize(info: MediaInfo, workdir: Path, ffmpeg: str = "ffmpeg", *, cancel: Event | None = None) -> AudioAsset:
-    wav_path = workdir / "analysis.wav"
+def _decode_pcm(info: MediaInfo, target: Path, ffmpeg: str, cancel: Event | None, *,
+                channels: int, sample_rate: int) -> None:
     run_tool(ffmpeg, "decode", 90, (
         "-nostdin", "-v", "error", "-xerror", "-protocol_whitelist", "file",
         "-f", info.demuxer, "-i", str(info.path), "-map", f"0:{info.stream_index}", "-vn", "-sn", "-dn",
-        "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", "-t", str(MAX_SECONDS + 1), str(wav_path),
+        "-ac", str(channels), "-ar", str(sample_rate), "-c:a", "pcm_s16le",
+        "-t", str(MAX_SECONDS + 1), str(target),
     ), cancel)
+
+
+def decode_original(info: MediaInfo, target: Path, ffmpeg: str, cancel: Event) -> Path:
+    _decode_pcm(info, target, ffmpeg, cancel, channels=2, sample_rate=48000)
+    try:
+        with wave.open(str(target), "rb") as wav:
+            duration = wav.getnframes() / wav.getframerate()
+            _check_duration(duration, "decode")
+            if duration == 0:
+                raise ValueError("Empty audio stream")
+    except (OSError, EOFError, ValueError, wave.Error) as exc:
+        raise NoteFlowError("DECODE_FAILED", "decode", "无法读取用于播放的原曲音轨。") from exc
+    return target
+
+
+def normalize(info: MediaInfo, workdir: Path, ffmpeg: str = "ffmpeg", *, cancel: Event | None = None) -> AudioAsset:
+    wav_path = workdir / "analysis.wav"
+    _decode_pcm(info, wav_path, ffmpeg, cancel, channels=1, sample_rate=SAMPLE_RATE)
     try:
         with wave.open(str(wav_path), "rb") as wav:
             frames = wav.getnframes()

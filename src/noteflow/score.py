@@ -1,9 +1,9 @@
 """Quantize a melody and map it to four-beat numbered notation."""
 
 import math
-from bisect import bisect_left
 from dataclasses import dataclass, replace
 from fractions import Fraction
+from heapq import heappop, heappush
 
 from .notes import NoteEvent
 
@@ -70,6 +70,7 @@ class Score:
     grid: BeatGrid
     measures: tuple[tuple[JianpuToken, ...], ...]
     revision: int
+    melody: tuple[NoteEvent, ...]
 
 
 def _strength(note: NoteEvent) -> float:
@@ -77,23 +78,53 @@ def _strength(note: NoteEvent) -> float:
 
 
 def monophonic(notes: tuple[NoteEvent, ...]) -> tuple[NoteEvent, ...]:
-    ranked = sorted(enumerate(notes), key=lambda pair: (
-        -_strength(pair[1]), pair[1].start_s, pair[1].start_s - pair[1].end_s, pair[1].midi, pair[0],
-    ))
-    accepted, starts = [], []
-    for _, note in ranked:
-        index = bisect_left(starts, note.start_s)
-        if index and accepted[index - 1].end_s > note.start_s:
-            continue
-        if index < len(starts) and starts[index] < note.end_s:
-            continue
-        starts.insert(index, note.start_s)
-        accepted.insert(index, note)
-    return tuple(accepted)
+    """Find a continuous melody through the candidate notes."""
+    candidates = sorted(notes, key=lambda note: (note.start_s, -_strength(note), -note.end_s, note.midi))
+    scores = [0.0]  # Index 0 is the empty path.
+    predecessors = [0]
+    recent: list[tuple[float, int]] = []
+    best_distant = best = 0
+    continuity_s = 0.6
+    for index, note in enumerate(candidates, start=1):
+        while recent and recent[0][0] <= note.start_s - continuity_s:
+            _, previous_index = heappop(recent)
+            if scores[previous_index] > scores[best_distant]:
+                best_distant = previous_index
+
+        # A sustained accompaniment note should not outweigh an entire phrase.
+        support = (0.5 + _strength(note)) * min(0.5, note.end_s - note.start_s)
+        previous_best, score = best_distant, scores[best_distant] + support
+        for end, previous_index in recent:
+            previous = candidates[previous_index - 1]
+            gap = note.start_s - end
+            # Let a new attack cut a short release tail, but require distinct attacks.
+            tail = min(0.085, (end - previous.start_s) / 3)
+            if note.start_s <= previous.start_s or gap < -tail:
+                continue
+            distance = min(12, abs(note.midi - previous.midi)) / 12
+            proximity = 1 - max(0, gap) / continuity_s
+            leap_cost = 0.55 * min(support, end - previous.start_s) * distance * proximity
+            value = scores[previous_index] + support - leap_cost + min(0, gap)
+            if value > score:
+                previous_best, score = previous_index, value
+
+        scores.append(score)
+        predecessors.append(previous_best)
+        heappush(recent, (note.end_s, index))
+        if score > scores[best]:
+            best = index
+
+    selected = []
+    while best:
+        note = candidates[best - 1]
+        if selected and note.end_s > selected[-1].start_s:
+            note = replace(note, end_s=selected[-1].start_s)
+        selected.append(note)
+        best = predecessors[best]
+    return tuple(reversed(selected))
 
 
-def quantize(notes: tuple[NoteEvent, ...], settings: ScoreSettings) -> BeatGrid:
-    selected = monophonic(notes)
+def _quantize(selected: tuple[NoteEvent, ...], settings: ScoreSettings, overlap_drops: int) -> BeatGrid:
     tick_per_second = PPQ * 1_000_000 / settings.tempo_us
 
     def tick(seconds: float) -> int:
@@ -116,7 +147,7 @@ def quantize(notes: tuple[NoteEvent, ...], settings: ScoreSettings) -> BeatGrid:
             end = entries[index + 1][0]
             clipped += 1
         quantized.append(QuantizedNote(note.id, start + shift, end - start, note.midi, note.velocity))
-    return BeatGrid(tuple(quantized), shift, len(notes) - len(selected), len(selected) - len(entries), clipped)
+    return BeatGrid(tuple(quantized), shift, overlap_drops, len(selected) - len(entries), clipped)
 
 
 def _measures(grid: BeatGrid, tonic: int) -> tuple[tuple[JianpuToken, ...], ...]:
@@ -147,13 +178,14 @@ def _measures(grid: BeatGrid, tonic: int) -> tuple[tuple[JianpuToken, ...], ...]
 
 
 def build_score(notes: tuple[NoteEvent, ...], settings: ScoreSettings, revision: int = 0) -> Score:
-    grid = quantize(notes, settings)
-    return Score(settings, grid, _measures(grid, settings.tonic_pc), revision)
+    melody = monophonic(notes)
+    grid = _quantize(melody, settings, len(notes) - len(melody))
+    return Score(settings, grid, _measures(grid, settings.tonic_pc), revision, melody)
 
 
 def rekey(score: Score, tonic: int, revision: int) -> Score:
     settings = replace(score.settings, tonic_pc=tonic)
-    return Score(settings, score.grid, _measures(score.grid, tonic), revision)
+    return replace(score, settings=settings, measures=_measures(score.grid, tonic), revision=revision)
 
 
 def to_text(score: Score) -> str:

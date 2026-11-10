@@ -1,4 +1,5 @@
 import os
+from dataclasses import replace
 from pathlib import Path
 from time import monotonic, sleep
 
@@ -95,10 +96,36 @@ def test_desktop_generates_calibrates_and_exports(app, window, tmp_path, monkeyp
             assert window._player is not None, window.status.text()
             wait_for(app, lambda: window._player and window._player.position() >= 150, timeout=10)
             assert not previous_path.exists()
+        window.melody_button.click()
+        wait_for(app, lambda: window._thread is None)
+        assert window._playing == "旋律", window.status.text()
+        wait_for(app, lambda: window._player and window._player.position() >= 150, timeout=10)
         final_path = window._preview_path
         window.stop_button.click()
         assert window._player is None
         wait_for(app, lambda: not final_path.exists(), timeout=2)
+
+
+def test_original_is_available_before_generation_without_soundfont(app, window, tmp_path):
+    if not QMediaDevices.audioOutputs():
+        pytest.skip("Original playback requires an audio device")
+    window.tools = replace(window.tools, soundfont="")
+    source = tmp_path / "试听 原曲.wav"
+    write_wave(source, 10, melody())
+    assert not window.original_button.isEnabled()
+    window.open_source(source)
+    wait_for(app, lambda: window._thread is None)
+    assert window.original_button.isEnabled()
+    assert not window.melody_button.isEnabled()
+    assert not window.play_button.isEnabled()
+    window.original_button.click()
+    wait_for(app, lambda: window._thread is None)
+    assert window._playing == "原曲", window.status.text()
+    wait_for(app, lambda: window._player and window._player.position() >= 150, timeout=10)
+    original_path = window._preview_path
+    window.stop_button.click()
+    wait_for(app, lambda: not original_path.exists(), timeout=2)
+    assert window._player is None and source.is_file()
 
 
 def test_desktop_cancellation_and_source_changes_discard_late_results(app, window, tmp_path, monkeypatch):

@@ -1,7 +1,7 @@
 import mido
 import pytest
 
-from noteflow.export import export_score
+from noteflow.export import export_score, write_midi
 from noteflow.notes import NoteEvent
 from noteflow.rhythm import from_beats
 from noteflow.score import BAR, ScoreSettings, build_score, rekey, to_text
@@ -37,6 +37,31 @@ def test_deterministic_overlaps_and_grid_collision():
         ("2", 0, 120), ("4", 120, 120), ("5", 240, 240),
     ]
     assert (score.grid.overlap_drops, score.grid.merged) == (1, 1)
+
+
+def test_melody_keeps_connected_attacks_over_a_stronger_sustained_bass():
+    notes = (note(1, 0, 1.2, 43, 0.95), note(2, 0, 0.35, 65),
+             note(3, 0.3, 0.65, 67), note(4, 0.6, 0.95, 69), note(5, 0.9, 1.2, 67))
+    score = build_score(notes, ScoreSettings())
+    assert [n.midi for n in score.grid.notes] == [65, 67, 69, 67]
+    assert [n.end_s for n in score.melody] == [0.3, 0.6, 0.9, 1.2]
+    assert score.grid.overlap_drops == 1
+
+
+def test_melody_preview_keeps_original_note_times_with_a_pickup(tmp_path):
+    score = build_score((note(1, 0.13, 0.42, 60), note(2, 0.49, 0.68, 64)),
+                        ScoreSettings(bpm=100, first_beat_s=0.35))
+    assert score.grid.shift_ticks == BAR
+    path = tmp_path / "preview.mid"
+    write_midi(score, 0, path, original_timing=True)
+    elapsed, times, pitches = 0, [], []
+    for message in mido.MidiFile(path):
+        elapsed += message.time
+        if message.type in {"note_on", "note_off"}:
+            times.append(elapsed)
+            pitches.append(message.note)
+    assert times == pytest.approx([0.13, 0.42, 0.49, 0.68], abs=0.001)
+    assert pitches == [60, 60, 64, 64]
 
 
 def test_empty_score_and_unreliable_beat_use_safe_defaults():
