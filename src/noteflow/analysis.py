@@ -1,7 +1,7 @@
 """Run the local transcription pipeline and own its temporary files."""
 
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
@@ -10,7 +10,8 @@ from .media import MediaInfo, normalize, probe
 from .notes import NoteEvent
 from .process import check_cancelled
 from .rhythm import BeatEstimate, estimate
-from .transcription import transcribe
+from .separation import separate
+from .transcription import refine_octaves, transcribe
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,26 +22,42 @@ class AnalysisResult:
     beat: BeatEstimate = BeatEstimate()
 
 
-def analyze(path: Path, *, ffmpeg: str = "ffmpeg", ffprobe: str = "ffprobe") -> AnalysisResult:
-    return analyze_media(probe(path, ffprobe), ffmpeg=ffmpeg)
+def analyze(path: Path, *, ffmpeg: str = "ffmpeg", ffprobe: str = "ffprobe",
+            demucs_python: str | None = None) -> AnalysisResult:
+    media = probe(path, ffprobe)
+    if demucs_python is None:
+        return analyze_media(media, ffmpeg=ffmpeg)
+    with TemporaryDirectory(prefix="noteflow-stems-") as directory:
+        stems = separate(media, Path(directory) / "stems", python=demucs_python, ffmpeg=ffmpeg)
+        return analyze_media(media, ffmpeg=ffmpeg, vocals=stems.vocals)
 
 
 def analyze_media(
     media: MediaInfo, *, ffmpeg: str = "ffmpeg", find_beats: bool = False,
     workdir: Path | None = None, cancel: Event | None = None,
-    progress: Callable[[str], None] | None = None,
+    progress: Callable[[str], None] | None = None, vocals: Path | None = None,
+    verify_pitch: bool = False,
 ) -> AnalysisResult:
     with TemporaryDirectory(prefix="noteflow-", dir=workdir) as directory:
+        directory = Path(directory)
         if progress:
             progress("正在解码音轨…")
-        audio = normalize(media, Path(directory), ffmpeg, cancel=cancel)
+        source = MediaInfo(vocals, 0, "pcm_s16le", "wav") if vocals is not None else media
+        audio = normalize(source, directory, ffmpeg, cancel=cancel)
         check_cancelled(cancel)
         if progress:
             progress("正在识别音高…")
         notes = transcribe(audio)
         check_cancelled(cancel)
-        if progress and find_beats:
-            progress("正在估计节奏…")
-        beat = estimate(audio) if find_beats else BeatEstimate()
+        if verify_pitch or vocals is not None:
+            if progress:
+                progress("正在复核八度…")
+            notes = refine_octaves(audio, notes, cancel, isolated=vocals is not None)
+        beat = BeatEstimate()
+        if find_beats:
+            if progress:
+                progress("正在估计节奏…")
+            mix = normalize(media, directory, ffmpeg, cancel=cancel, filename="mix.wav") if vocals else audio
+            beat = estimate(mix)
         check_cancelled(cancel)
         return AnalysisResult(media, audio.duration_s, notes, beat)

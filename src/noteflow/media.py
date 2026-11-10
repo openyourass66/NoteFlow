@@ -103,8 +103,9 @@ def _decode_pcm(info: MediaInfo, target: Path, ffmpeg: str, cancel: Event | None
     ), cancel)
 
 
-def decode_original(info: MediaInfo, target: Path, ffmpeg: str, cancel: Event) -> Path:
-    _decode_pcm(info, target, ffmpeg, cancel, channels=2, sample_rate=48000)
+def decode_original(info: MediaInfo, target: Path, ffmpeg: str, cancel: Event | None, *,
+                    sample_rate: int = 48000) -> Path:
+    _decode_pcm(info, target, ffmpeg, cancel, channels=2, sample_rate=sample_rate)
     try:
         with wave.open(str(target), "rb") as wav:
             duration = wav.getnframes() / wav.getframerate()
@@ -116,8 +117,9 @@ def decode_original(info: MediaInfo, target: Path, ffmpeg: str, cancel: Event) -
     return target
 
 
-def normalize(info: MediaInfo, workdir: Path, ffmpeg: str = "ffmpeg", *, cancel: Event | None = None) -> AudioAsset:
-    wav_path = workdir / "analysis.wav"
+def normalize(info: MediaInfo, workdir: Path, ffmpeg: str = "ffmpeg", *,
+              cancel: Event | None = None, filename: str = "analysis.wav") -> AudioAsset:
+    wav_path = workdir / filename
     _decode_pcm(info, wav_path, ffmpeg, cancel, channels=1, sample_rate=SAMPLE_RATE)
     try:
         with wave.open(str(wav_path), "rb") as wav:

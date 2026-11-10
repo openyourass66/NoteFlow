@@ -36,8 +36,12 @@ def test_portable_app_uses_adjacent_tools_and_honors_explicit_overrides(tmp_path
     tool_dir.mkdir(parents=True)
     for name in ("ffprobe.exe", "ffmpeg.exe", "bank.sf2"):
         (tool_dir / name).touch()
+    demucs_python = tool_dir / "demucs" / "Scripts" / "python.exe"
+    demucs_python.parent.mkdir(parents=True)
+    demucs_python.touch()
     monkeypatch.delenv("NOTEFLOW_FFPROBE", raising=False)
     monkeypatch.delenv("NOTEFLOW_SOUNDFONT", raising=False)
+    monkeypatch.delenv("NOTEFLOW_DEMUCS_PYTHON", raising=False)
     ffmpeg = str(tmp_path / "other-ffmpeg.exe")
     monkeypatch.setenv("NOTEFLOW_FFMPEG", ffmpeg)
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
@@ -47,6 +51,7 @@ def test_portable_app_uses_adjacent_tools_and_honors_explicit_overrides(tmp_path
     assert tools.ffmpeg == ffmpeg
     assert tools.ffprobe == str(tool_dir / "ffprobe.exe")
     assert tools.soundfont == str(tool_dir / "bank.sf2")
+    assert tools.demucs_python == str(demucs_python)
 
     custom_probe = str(tmp_path / "custom" / "ffprobe.exe")
     settings.setValue("tools/ffprobe", custom_probe)

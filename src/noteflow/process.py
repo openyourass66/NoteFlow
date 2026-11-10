@@ -23,7 +23,7 @@ def run_tool(command: str, stage: str, timeout: int, args: tuple[str, ...], canc
     executable = shutil.which(command)
     if executable is None:
         raise NoteFlowError("TOOL_NOT_FOUND", stage, f"找不到 {Path(command).name}，请在工具设置中检查路径。")
-    code = "SYNTH_FAILED" if stage == "render" else "DECODE_FAILED"
+    code = {"render": "SYNTH_FAILED", "separate": "SEPARATION_FAILED"}.get(stage, "DECODE_FAILED")
     try:
         with subprocess.Popen(
             [str(Path(executable).resolve()), *args], stdin=subprocess.DEVNULL,
@@ -47,6 +47,8 @@ def run_tool(command: str, stage: str, timeout: int, args: tuple[str, ...], canc
                     process.kill()
                     process.communicate()
             if process.returncode:
+                if stage == "separate":
+                    raise NoteFlowError(code, stage, "人声分离失败，请检查 Demucs 环境和首次下载模型所需的网络。")
                 raise NoteFlowError(code, stage, f"{Path(command).name} 处理失败，请检查输入文件和工具版本。")
     except OSError as exc:
         raise NoteFlowError(code, stage, f"无法运行 {Path(command).name}。") from exc

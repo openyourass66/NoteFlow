@@ -15,6 +15,7 @@ from noteflow import desktop
 from noteflow.desktop_settings import _default_tools
 from noteflow.process import check_cancelled
 from noteflow.score import to_text
+from noteflow.separation import Stems
 from poc.fixtures import melody, write_wave
 
 
@@ -126,6 +127,44 @@ def test_original_is_available_before_generation_without_soundfont(app, window, 
     window.stop_button.click()
     wait_for(app, lambda: not original_path.exists(), timeout=2)
     assert window._player is None and source.is_file()
+
+
+def test_desktop_can_preview_stems_and_transcribe_only_vocals(app, window, tmp_path, monkeypatch):
+    source = tmp_path / "mixed.wav"
+    expected = melody()
+    write_wave(source, 10, [(0, 9, 43)])
+    window.tools = replace(window.tools, demucs_python="test-python")
+
+    def separate(media, destination, **_):
+        assert media.path == source
+        destination.mkdir()
+        vocals, accompaniment = destination / "vocals.wav", destination / "no_vocals.wav"
+        write_wave(vocals, 10, expected)
+        write_wave(accompaniment, 10, [(0, 9, 43)])
+        return Stems(vocals, accompaniment)
+
+    monkeypatch.setattr(desktop, "separate", separate)
+    played = []
+    monkeypatch.setattr(window, "_play_rendered", lambda path, label: played.append((path, label)))
+    window.open_source(source)
+    wait_for(app, lambda: window._thread is None)
+    assert not window.vocals_button.isEnabled()
+    window.separate_button.click()
+    wait_for(app, lambda: window._thread is None)
+    assert window.stems is not None, window.status.text()
+    stems = window.stems
+    window.vocals_button.click()
+    window.accompaniment_button.click()
+    assert played == [(stems.vocals, "人声"), (stems.accompaniment, "伴奏")]
+
+    window.generate_button.click()
+    wait_for(app, lambda: window._thread is None)
+    assert window.score is not None, window.status.text()
+    assert [n.midi for n in window.score.melody] == [midi for _, _, midi in expected]
+
+    window.open_source(source)
+    wait_for(app, lambda: window._thread is None)
+    assert not window.vocals_button.isEnabled() and not stems.vocals.exists()
 
 
 def test_desktop_cancellation_and_source_changes_discard_late_results(app, window, tmp_path, monkeypatch):

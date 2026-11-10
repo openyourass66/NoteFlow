@@ -17,11 +17,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("source", type=Path, help="PCM WAV、MP3 或含 AAC 音轨的 MP4 / M4A")
     parser.add_argument("--ffmpeg", default="ffmpeg", help="FFmpeg 路径，默认从 PATH 查找")
     parser.add_argument("--ffprobe", default="ffprobe", help="ffprobe 路径，默认从 PATH 查找")
+    parser.add_argument("--demucs-python", help="已安装 Demucs 的 Python 路径。提供时先分离人声，再识别音符")
     args = parser.parse_args(argv)
 
     try:
         with redirect_stdout(StringIO()):
-            result = analyze(args.source, ffmpeg=args.ffmpeg, ffprobe=args.ffprobe)
+            result = analyze(args.source, ffmpeg=args.ffmpeg, ffprobe=args.ffprobe,
+                             demucs_python=args.demucs_python)
     except NoteFlowError as exc:
         error = {"code": exc.code, "stage": exc.stage, "message": str(exc)}
         print(json.dumps({"error": error}, ensure_ascii=False), file=sys.stderr)

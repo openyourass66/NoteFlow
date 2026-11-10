@@ -18,6 +18,7 @@ class Tools:
     ffprobe: str = "ffprobe"
     fluidsynth: str = "fluidsynth"
     soundfont: str = ""
+    demucs_python: str = ""
 
 
 def _tool_directories() -> tuple[Path, ...]:
@@ -45,16 +46,17 @@ def _default_tools() -> Tools:
         find("ffprobe.exe", "ffmpeg/bin/ffprobe.exe", "ffmpeg/*/bin/ffprobe.exe") or "ffprobe",
         find("fluidsynth.exe", "fluidsynth/bin/fluidsynth.exe", "fluidsynth/*/bin/fluidsynth.exe") or "fluidsynth",
         find("*.sf2"),
+        find("demucs/Scripts/python.exe"),
     )
 
 
 def load_tools(settings: QSettings) -> Tools:
     defaults = _default_tools()
     values = {}
-    for name in ("ffmpeg", "ffprobe", "fluidsynth", "soundfont"):
+    for name in ("ffmpeg", "ffprobe", "fluidsynth", "soundfont", "demucs_python"):
         fallback = getattr(defaults, name)
         configured = settings.value(f"tools/{name}", fallback, str)
-        if name != "soundfont" and configured.lower() in ("", name, f"{name}.exe"):
+        if name in ("ffmpeg", "ffprobe", "fluidsynth", "demucs_python") and configured.lower() in ("", name, f"{name}.exe"):
             configured = fallback
         values[name] = os.environ.get(f"NOTEFLOW_{name.upper()}") or configured
     return Tools(**values)
@@ -63,17 +65,19 @@ def load_tools(settings: QSettings) -> Tools:
 def edit_tools(parent: QWidget, settings: QSettings, tools: Tools) -> Tools:
     dialog = QDialog(parent)
     dialog.setWindowTitle("工具与音源")
-    dialog.resize(650, 240)
+    dialog.resize(650, 280)
     outer = QVBoxLayout(dialog)
     form = QFormLayout()
     outer.addLayout(form)
     edits = {}
     for name, label in (("ffmpeg", "FFmpeg"), ("ffprobe", "ffprobe"),
-                        ("fluidsynth", "FluidSynth"), ("soundfont", "SoundFont（SF2）")):
+                        ("fluidsynth", "FluidSynth"), ("soundfont", "SoundFont（SF2）"),
+                        ("demucs_python", "Demucs Python")):
         edit = QLineEdit(getattr(tools, name))
         edit.setMinimumHeight(36)
         edit.setAccessibleName(label)
-        edit.setPlaceholderText("选择本地 SF2 文件" if name == "soundfont" else "输入路径或从 PATH 查找")
+        placeholder = {"soundfont": "选择本地 SF2 文件", "demucs_python": "选择已安装 Demucs 的 python.exe"}
+        edit.setPlaceholderText(placeholder.get(name, "输入路径或从 PATH 查找"))
         edits[name] = edit
         browse = QPushButton("浏览…")
         browse.setAccessibleName(f"浏览 {label}")

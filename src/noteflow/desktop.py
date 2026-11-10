@@ -27,6 +27,7 @@ from .media import MEDIA_SUFFIXES, decode_original, probe
 from .process import Cancelled, check_cancelled
 from .score import BPM_MAX, BPM_MIN, KEYS, ScoreSettings, build_score, rekey
 from .score_view import ScoreView
+from .separation import separate
 from .synthesis import render_preview
 
 LOG = logging.getLogger("noteflow")
@@ -73,6 +74,7 @@ class MainWindow(QMainWindow):
         self.workspace = TemporaryDirectory(prefix="session-", dir=cache, ignore_cleanup_errors=True)
         self.workdir = Path(self.workspace.name)
         self.media = self.analysis = self.score = None
+        self.stems = self._stem_workspace = None
         self._revision = 0
         self._thread = self._worker = self._cancel = self._callback = None
         self._pending_source = None
@@ -117,6 +119,14 @@ class MainWindow(QMainWindow):
         self.source_label.setTextFormat(Qt.TextFormat.PlainText)
         self.source_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.source_label)
+
+        tracks = QHBoxLayout()
+        tracks.setSpacing(8)
+        layout.addLayout(tracks)
+        self.separate_button = self._button(tracks, "分离人声与伴奏", self.separate_tracks)
+        self.vocals_button = self._button(tracks, "播放人声", lambda: self.play_stem(vocals=True))
+        self.accompaniment_button = self._button(tracks, "播放伴奏", lambda: self.play_stem(vocals=False))
+        tracks.addStretch()
 
         controls = QHBoxLayout()
         layout.addLayout(controls)
@@ -200,6 +210,9 @@ class MainWindow(QMainWindow):
         self.settings_button.setEnabled(not busy)
         self.generate_button.setEnabled(not busy and self.media is not None)
         self.original_button.setEnabled(not busy and self.media is not None)
+        self.separate_button.setEnabled(not busy and self.media is not None and self.stems is None)
+        for control in (self.vocals_button, self.accompaniment_button):
+            control.setEnabled(not busy and self.stems is not None)
         self.cancel_button.setEnabled(busy and not self._cancel.is_set())
         for control in (self.bpm, self.offset, self.key, self.apply_button,
                         self.instrument, self.melody_button, self.play_button, self.txt_button, self.midi_button):
@@ -242,6 +255,8 @@ class MainWindow(QMainWindow):
         value, error = self._worker.outcome or (None, NoteFlowError("UNEXPECTED", "worker", "后台任务中断。"))
         self._thread.deleteLater()
         self._thread = self._worker = self._cancel = self._callback = None
+        if self.stems is None and (cancelled or error):
+            self._clear_stems()
         if self._closing:
             self.close()
             return
@@ -292,6 +307,7 @@ class MainWindow(QMainWindow):
             self.cancel_job()
             return
         self._stop_player()
+        self._clear_stems()
         self.media = self.analysis = self.score = None
         self.score_view.set_score(None)
         self.source_label.setText(source.name)
@@ -301,7 +317,7 @@ class MainWindow(QMainWindow):
     def _imported(self, media):
         self.media = media
         self._show_media(media.duration_s)
-        self._status("音轨已就绪，可以播放原曲或生成简谱。")
+        self._status("音轨已就绪。歌曲混音可先分离人声与伴奏，清唱或独奏可直接生成简谱。")
 
     def _show_media(self, duration):
         length = f"{duration:.2f} 秒" if duration is not None else "时长待解码确认"
@@ -312,12 +328,13 @@ class MainWindow(QMainWindow):
             return
         self._stop_player()
         media, ffmpeg, workdir = self.media, self.tools.ffmpeg, self.workdir
+        vocals = self.stems.vocals if self.stems else None
         self._revision += 1
         revision = self._revision
 
         def generate(cancel, progress):
             analysis = analyze_media(media, ffmpeg=ffmpeg, find_beats=True, workdir=workdir,
-                                     cancel=cancel, progress=progress)
+                                     cancel=cancel, progress=progress, vocals=vocals, verify_pitch=True)
             progress("正在生成简谱…")
             beat = analysis.beat
             score = build_score(analysis.notes, ScoreSettings(beat.bpm, beat.first_beat_s), revision)
@@ -336,7 +353,8 @@ class MainWindow(QMainWindow):
         self.bpm.setValue(score.settings.bpm)
         self.offset.setValue(score.settings.first_beat_s)
         self.key.setCurrentIndex(score.settings.tonic_pc)
-        message = f"{len(score.measures)} 小节，{len(score.grid.notes)} 个音符。"
+        source = "人声" if self.stems else "原曲"
+        message = f"{source}简谱，{len(score.measures)} 小节，{len(score.grid.notes)} 个音符。"
         if not calibrated:
             message += "拍点证据不足，当前使用 120 BPM，请手动校准。"
         if score.grid.overlap_drops / len(self.analysis.notes) > 0.3:
@@ -368,6 +386,45 @@ class MainWindow(QMainWindow):
         self._preview_path = target
         self._start("正在准备原曲音轨…", lambda cancel, _: decode_original(media, target, ffmpeg, cancel),
                     lambda path: self._play_rendered(path, "原曲"))
+
+    def separate_tracks(self):
+        if self.media is None or self.stems is not None or self._thread is not None:
+            return
+        if not self.tools.demucs_python:
+            self._status("请先在工具设置中选择已安装 Demucs 的 Python。")
+            return
+        try:
+            self._stem_workspace = TemporaryDirectory(prefix="tracks-", dir=self.workdir, ignore_cleanup_errors=True)
+        except OSError:
+            self._status("无法创建分轨工作目录，请检查缓存目录和磁盘空间。")
+            return
+        self._stop_player()
+        destination = Path(self._stem_workspace.name) / "stems"
+        media, tools = self.media, self.tools
+        self._start("正在分离人声与伴奏，首次运行会下载模型…",
+                    lambda cancel, _: separate(media, destination, python=tools.demucs_python,
+                                               ffmpeg=tools.ffmpeg, cancel=cancel),
+                    self._tracks_ready)
+
+    def _tracks_ready(self, stems):
+        self.stems = stems
+        self.analysis = self.score = None
+        self.score_view.set_score(None)
+        self._status("人声与伴奏已分离，可以分别播放。生成简谱将识别人声。")
+
+    def _clear_stems(self):
+        self.stems = None
+        if self._stem_workspace is not None:
+            self._stem_workspace.cleanup()
+            self._stem_workspace = None
+
+    def play_stem(self, *, vocals):
+        if self.stems is None or self._thread is not None:
+            return
+        self._stop_player()
+        path, label = (self.stems.vocals, "人声") if vocals else (self.stems.accompaniment, "伴奏")
+        self._play_rendered(path, label)
+        self._sync_controls()
 
     def play(self, *, original_timing=False):
         if self.score is None or self._thread is not None:
@@ -470,6 +527,7 @@ class MainWindow(QMainWindow):
             self.cancel_job()
             return
         self._stop_player()
+        self._clear_stems()
         self.workspace.cleanup()
         event.accept()
 
