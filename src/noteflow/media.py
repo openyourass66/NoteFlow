@@ -2,13 +2,13 @@
 
 import json
 import math
-import shutil
-import subprocess
 import wave
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 
 from .errors import NoteFlowError
+from .process import check_cancelled, run_tool
 
 SAMPLE_RATE = 22050
 MAX_SECONDS = 120
@@ -21,6 +21,7 @@ class MediaInfo:
     path: Path
     stream_index: int
     codec: str
+    duration_s: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,23 +29,6 @@ class AudioAsset:
     path: Path
     duration_s: float
     has_signal: bool
-
-
-def _run_tool(command: str, stage: str, timeout: int, *args: str) -> bytes:
-    executable = shutil.which(command)
-    if executable is None:
-        raise NoteFlowError("TOOL_NOT_FOUND", stage, "找不到媒体工具，请检查 FFmpeg 和 ffprobe 的路径。")
-    try:
-        result = subprocess.run(
-            [str(Path(executable).resolve()), *args], stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout, check=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise NoteFlowError("DECODE_FAILED", stage, "媒体工具运行超时，请检查文件是否损坏。") from exc
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise NoteFlowError("DECODE_FAILED", stage, "无法读取媒体，请检查文件格式或文件是否损坏。") from exc
-    return result.stdout
 
 
 def _check_duration(duration: float, stage: str) -> None:
@@ -60,7 +44,8 @@ def _known_duration(value) -> float | None:
     return duration if math.isfinite(duration) and duration > 0 else None
 
 
-def probe(path: Path, ffprobe: str = "ffprobe") -> MediaInfo:
+def probe(path: Path, ffprobe: str = "ffprobe", *, cancel: Event | None = None) -> MediaInfo:
+    check_cancelled(cancel)
     try:
         path = path.resolve(strict=True)
         with path.open("rb"):
@@ -74,11 +59,11 @@ def probe(path: Path, ffprobe: str = "ffprobe") -> MediaInfo:
         raise NoteFlowError("INPUT_LIMIT", "probe", "文件超过 200 MB，请截取片段后重试。")
 
     demuxer, expected_codec = media_format
-    output = _run_tool(
-        ffprobe, "probe", 15, "-v", "error", "-protocol_whitelist", "file", "-f", demuxer,
+    output = run_tool(ffprobe, "probe", 15, (
+        "-v", "error", "-protocol_whitelist", "file", "-f", demuxer,
         "-show_entries", "stream=index,codec_type,codec_name,duration:format=duration",
         "-of", "json", "-i", str(path),
-    )
+    ), cancel)
     try:
         metadata = json.loads(output)
         track = next((stream for stream in metadata.get("streams", ()) if stream.get("codec_type") == "audio"), None)
@@ -99,17 +84,17 @@ def probe(path: Path, ffprobe: str = "ffprobe") -> MediaInfo:
         raise NoteFlowError("UNSUPPORTED_MEDIA", "probe", "首条音轨的编码不受支持。")
     if duration is not None:
         _check_duration(duration, "probe")
-    return MediaInfo(path, index, codec)
+    return MediaInfo(path, index, codec, duration)
 
 
-def normalize(info: MediaInfo, workdir: Path, ffmpeg: str = "ffmpeg") -> AudioAsset:
+def normalize(info: MediaInfo, workdir: Path, ffmpeg: str = "ffmpeg", *, cancel: Event | None = None) -> AudioAsset:
     wav_path = workdir / "analysis.wav"
     demuxer = FORMATS[info.path.suffix.lower()][0]
-    _run_tool(
-        ffmpeg, "decode", 90, "-nostdin", "-v", "error", "-xerror", "-protocol_whitelist", "file",
+    run_tool(ffmpeg, "decode", 90, (
+        "-nostdin", "-v", "error", "-xerror", "-protocol_whitelist", "file",
         "-f", demuxer, "-i", str(info.path), "-map", f"0:{info.stream_index}", "-vn", "-sn", "-dn",
         "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", "-t", str(MAX_SECONDS + 1), str(wav_path),
-    )
+    ), cancel)
     try:
         with wave.open(str(wav_path), "rb") as wav:
             frames = wav.getnframes()
@@ -119,6 +104,7 @@ def normalize(info: MediaInfo, workdir: Path, ffmpeg: str = "ffmpeg") -> AudioAs
             _check_duration(duration, "decode")
             has_signal = False
             while frames:
+                check_cancelled(cancel)
                 count = min(frames, 32768)
                 block = wav.readframes(count)
                 if len(block) != count * 2:

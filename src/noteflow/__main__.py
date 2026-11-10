@@ -38,6 +38,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 1 or sys.argv[1] == "--gui":
+        from .desktop import main as desktop_main
+
+        raise SystemExit(desktop_main(Path(sys.argv[2]) if len(sys.argv) == 3 else None))
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
     raise SystemExit(main())

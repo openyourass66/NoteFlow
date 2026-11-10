@@ -1,22 +1,12 @@
 """Adapt Basic Pitch output to time-based NoteFlow events."""
 
 import math
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
 from .errors import NoteFlowError
 from .media import AudioAsset
-
-
-@dataclass(frozen=True, slots=True)
-class NoteEvent:
-    id: str
-    start_s: float
-    end_s: float
-    midi: int
-    strength: float | None
-    velocity: int
+from .notes import NoteEvent
 
 
 @lru_cache(maxsize=1)
