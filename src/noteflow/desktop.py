@@ -13,15 +13,15 @@ from threading import Event
 from time import perf_counter
 from uuid import uuid4
 
-from PySide6.QtCore import QObject, QSettings, QStandardPaths, QThread, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QSize, QStandardPaths, QThread, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QInputDialog, QMainWindow, QMessageBox, QTableWidgetItem,
+    QApplication, QFileDialog, QInputDialog, QListWidgetItem, QMainWindow, QMessageBox, QTableWidgetItem,
 )
 
 from .analysis import analyze_media
 from .desktop_settings import Tools, edit_tools, load_tools
-from .desktop_ui import build_interface
+from .desktop_ui import build_interface, set_transport_paused
 from .errors import NoteFlowError
 from .export import PROGRAMS, export_score
 from .media import MEDIA_SUFFIXES, decode_original, probe
@@ -113,8 +113,15 @@ class MainWindow(QMainWindow):
 
     def _sync_controls(self):
         busy, ready = self._thread is not None, self.score is not None
-        media_ready = not busy and self.media is not None
+        has_media = self.media is not None
+        media_ready = not busy and has_media
         export_ready = not busy and (ready or self.stems is not None)
+        self.pages.setCurrentWidget(self.editor_page if has_media else self.start_page)
+        self.workflow_actions.setVisible(has_media)
+        self.toolbar_spacer.setVisible(not has_media)
+        self.start_import.setEnabled(not self._closing)
+        self.start_open_project.setEnabled(not self._closing)
+        self.recent_list.setEnabled(not self._closing)
         self.open_button.setEnabled(not self._closing)
         self.settings_action.setEnabled(not busy)
         self.generate_button.setEnabled(media_ready)
@@ -144,6 +151,8 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(self._player is not None)
         self.pause_button.setEnabled(self._player is not None)
         self.timeline.setEnabled(self._player is not None)
+        for button in self.track_buttons:
+            button.setChecked(button.text() == self._playing)
         if ready and not self.score.melody:
             self.melody_button.setEnabled(False)
             self.play_button.setEnabled(False)
@@ -403,8 +412,8 @@ class MainWindow(QMainWindow):
         player.setPlaybackRate((0.5, 0.75, 1, 1.25, 1.5)[self.rate.currentIndex()])
         player.durationChanged.connect(lambda duration: self.timeline.setRange(0, duration) if self._player is player else None)
         player.positionChanged.connect(lambda position: self._position_changed(position) if self._player is player else None)
-        player.playbackStateChanged.connect(lambda state: self.pause_button.setText(
-            "继续" if state == QMediaPlayer.PlaybackState.PausedState else "暂停") if self._player is player else None)
+        player.playbackStateChanged.connect(lambda state: set_transport_paused(
+            self.pause_button, state == QMediaPlayer.PlaybackState.PausedState) if self._player is player else None)
         player.errorOccurred.connect(lambda _code, _detail: self._playback_done(player, failed=True))
         player.mediaStatusChanged.connect(lambda state: self._playback_done(player) if state == QMediaPlayer.MediaStatus.EndOfMedia else None)
         self._status(f"正在播放{label}…")
@@ -435,7 +444,7 @@ class MainWindow(QMainWindow):
         self._playing = None
         self.timeline.setValue(0)
         self.time_label.setText("00:00 / 00:00")
-        self.pause_button.setText("暂停")
+        set_transport_paused(self.pause_button, False)
         self.score_view.set_active_note(None)
         if player is not None:
             player.stop()
@@ -527,10 +536,19 @@ class MainWindow(QMainWindow):
         menu = self.recent_menu
         menu.clear()
         metrics = menu.fontMetrics()
+        self.recent_list.clear()
         for recent in map(Path, paths[:8]):
             name = metrics.elidedText(recent.stem, Qt.TextElideMode.ElideMiddle, 360).replace("&", "&&")
             action = menu.addAction(name, lambda _checked=False, path=recent: self.open_source(path))
             action.setToolTip(str(recent))
+            if self.recent_list.count() < 3:
+                item = QListWidgetItem(recent.stem)
+                item.setData(Qt.ItemDataRole.UserRole, str(recent))
+                item.setToolTip(str(recent))
+                item.setSizeHint(QSize(0, 30))
+                self.recent_list.addItem(item)
+        self.recent_list.setFixedHeight(self.recent_list.count() * 30 + 8)
+        self.start_recent.setVisible(bool(paths))
         menu.menuAction().setVisible(bool(paths))
 
     def _remember_project(self, path):
@@ -839,6 +857,8 @@ class MainWindow(QMainWindow):
 
 def main(source: Path | None = None) -> int:
     app = QApplication(["NoteFlow"])
+    if app.platformName() == "windows":
+        app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
     app.setStyle("Fusion")
     app.setApplicationName("NoteFlow")
     app.setOrganizationName("NoteFlow")

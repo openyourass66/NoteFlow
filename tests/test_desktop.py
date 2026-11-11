@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog
 
 from noteflow import desktop
 from noteflow.desktop_settings import _default_tools
+from noteflow.media import MediaInfo
 from noteflow.process import check_cancelled
 from noteflow.score import to_text
 from noteflow.separation import Stems
@@ -66,12 +67,19 @@ def test_toolbar_preserves_file_shortcuts_and_recent_projects(app, tmp_path, mon
     window.activateWindow()
     app.processEvents()
     try:
+        assert window.start_page.isVisible()
+        assert not window.editor_page.isVisible()
         QTest.keyClick(window, Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
         assert opened == [recent]
         action, = window.recent_menu.actions()
         assert action.text() == "曲目 && 项目"
         action.trigger()
-        assert opened == [recent, recent]
+        window.recent_list.itemActivated.emit(window.recent_list.item(0))
+        assert opened == [recent, recent, recent]
+        window._imported(MediaInfo(tmp_path / "音轨.wav", 0, "pcm_s16le", "wav", 2))
+        window._sync_controls()
+        assert window.editor_page.isVisible()
+        assert not window.start_page.isVisible()
         QTest.keyClick(window, Qt.Key.Key_Tab, Qt.KeyboardModifier.ControlModifier)
         assert window.note_table.isVisible()
     finally:
@@ -149,10 +157,12 @@ def test_original_is_available_before_generation_without_soundfont(app, window, 
     window.original_button.click()
     wait_for(app, lambda: window._thread is None)
     assert window._playing == "原曲", window.status.text()
+    assert window.original_button.isChecked()
     wait_for(app, lambda: window._player and window._player.position() >= 150, timeout=10)
     original_path = window._preview_path
     window.pause_button.click()
     assert window._player.playbackState() == desktop.QMediaPlayer.PlaybackState.PausedState
+    assert window.pause_button.accessibleName() == "继续播放"
     window.timeline.setValue(1500)
     window.seek()
     assert window._player.position() == 1500
@@ -161,6 +171,7 @@ def test_original_is_available_before_generation_without_soundfont(app, window, 
     window.stop_button.click()
     wait_for(app, lambda: not original_path.exists(), timeout=2)
     assert window._player is None and source.is_file()
+    assert not window.original_button.isChecked()
 
 
 def test_desktop_can_preview_stems_and_transcribe_only_vocals(app, window, tmp_path, monkeypatch):
