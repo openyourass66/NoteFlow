@@ -13,9 +13,13 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from noteflow import desktop
+from noteflow.analysis import AnalysisResult
 from noteflow.desktop_settings import _default_tools
+from noteflow.errors import NoteFlowError
 from noteflow.media import MediaInfo
+from noteflow.notes import NoteEvent
 from noteflow.process import check_cancelled
+from noteflow.rhythm import BeatEstimate
 from noteflow.score import to_text
 from noteflow.separation import Stems
 from poc.fixtures import melody, write_wave
@@ -235,11 +239,65 @@ def test_desktop_can_preview_stems_and_transcribe_only_vocals(app, window, tmp_p
     window.open_source(project)
     wait_for(app, lambda: window._thread is None)
     assert window.stems is not None and window.stems.vocals.exists(), window.status.text()
-    assert window._analysis_vocals and window.source_mode.currentIndex() == 1
+    assert window._analysis_vocals and window.source_mode.currentData() == "vocals"
     restored = window.stems
     window.open_source(source)
     wait_for(app, lambda: window._thread is None)
     assert not window.vocals_button.isEnabled() and not restored.vocals.exists()
+
+
+@pytest.mark.parametrize("mode", ["auto", "original", "no_demucs", "failed", "sparse"])
+def test_mixed_song_generation_uses_available_vocal_melody(app, window, tmp_path, monkeypatch, mode):
+    source = tmp_path / "mixed.wav"
+    write_wave(source, 3, [(0, 2.5, 40)])
+    window.tools = replace(window.tools, demucs_python="" if mode == "no_demucs" else "test-python")
+    lead = tuple(NoteEvent(f"v{i}", i * 0.5, i * 0.5 + 0.45, pitch, 0.5, 80)
+                 for i, pitch in enumerate((69, 67, 64, 62)))
+    mix = lead + tuple(replace(note, id=f"b{i}", midi=40, strength=0.95) for i, note in enumerate(lead))
+    beat = BeatEstimate(100, 0.12, True)
+    analyzed, separated = [], []
+
+    def analyze(media, *, vocals, find_beats, **_):
+        analyzed.append((vocals, find_beats))
+        notes = mix if vocals is None else lead[:1] if mode == "sparse" else lead
+        return AnalysisResult(media, 3, notes, beat if find_beats else BeatEstimate())
+
+    def separate(media, destination, **_):
+        assert media.path == source
+        separated.append(destination)
+        if mode == "failed":
+            raise NoteFlowError("SEPARATION_FAILED", "separate", "测试分离失败。")
+        destination.mkdir()
+        stems = Stems(destination / "vocals.wav", destination / "no_vocals.wav")
+        stems.vocals.touch()
+        stems.accompaniment.touch()
+        return stems
+
+    monkeypatch.setattr(desktop, "analyze_media", analyze)
+    monkeypatch.setattr(desktop, "separate", separate)
+    window.open_source(source)
+    wait_for(app, lambda: window._thread is None)
+    assert window.source_mode.currentData() == "auto"
+    if mode == "original":
+        window.source_mode.setCurrentIndex(window.source_mode.findData("original"))
+    window.generate_button.click()
+    wait_for(app, lambda: window._thread is None)
+    assert window.score is not None, window.status.text()
+    assert window.analysis.beat == beat
+    assert analyzed[0] == (None, True)
+    if mode == "auto":
+        assert analyzed[1:] == [(window.stems.vocals, False)]
+        assert window._analysis_vocals and window.vocals_button.isEnabled()
+        assert window.score.melody == lead
+        window.generate_button.click()
+        wait_for(app, lambda: window._thread is None)
+        assert window.score.melody == lead and len(separated) == 1
+    else:
+        assert not window._analysis_vocals and window.stems is None
+        assert window._stem_workspace is None
+        assert [note.midi for note in window.score.melody] == [40] * len(lead)
+        assert len(separated) == (1 if mode in {"failed", "sparse"} else 0)
+        assert all(not directory.parent.exists() for directory in separated)
 
 
 def test_desktop_cancellation_and_source_changes_discard_late_results(app, window, tmp_path, monkeypatch):

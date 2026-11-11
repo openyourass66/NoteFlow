@@ -5,7 +5,7 @@ import math
 import os
 import shutil
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QApplication, QFileDialog, QInputDialog, QListWidgetItem, QMainWindow, QMessageBox, QTableWidgetItem,
 )
 
-from .analysis import analyze_media
+from .analysis import AnalysisResult, analyze_media
 from .desktop_settings import Tools, edit_tools, load_tools
 from .desktop_ui import build_interface, set_transport_paused
 from .errors import NoteFlowError
@@ -28,11 +28,30 @@ from .media import MEDIA_SUFFIXES, decode_original, probe
 from .process import Cancelled, check_cancelled
 from .project import Project, load_project, save_project
 from .notes import NoteEvent
-from .score import ScoreSettings, build_score, rekey
-from .separation import separate
+from .score import Score, ScoreSettings, build_score, rekey
+from .separation import Stems, separate
 from .synthesis import render_preview
 
 LOG = logging.getLogger("noteflow")
+HEAVY_OVERLAP = 0.3
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedScore:
+    analysis: AnalysisResult
+    score: Score
+    from_vocals: bool = False
+    stems: Stems | None = None
+    notice: str = ""
+
+
+def _overlap_fraction(score: Score) -> float:
+    dropped = score.grid.overlap_drops
+    return dropped / max(1, dropped + len(score.melody))
+
+
+def _melody_duration(score: Score) -> float:
+    return sum(note.end_s - note.start_s for note in score.melody)
 
 
 class Job(QObject):
@@ -129,7 +148,7 @@ class MainWindow(QMainWindow):
         self.save_button.setEnabled(media_ready)
         self.save_as_action.setEnabled(media_ready)
         self.source_mode.setEnabled(media_ready)
-        self.source_mode.model().item(1).setEnabled(self.stems is not None)
+        self.source_mode.model().item(self.source_mode.findData("vocals")).setEnabled(self.stems is not None)
         self.recent_menu.menuAction().setEnabled(not self._closing)
         self.note_table.setEnabled(ready and not busy)
         for control in (self.add_note_button, self.delete_note_button, self.lower_button,
@@ -276,37 +295,70 @@ class MainWindow(QMainWindow):
         if self.media is None or self._thread is not None:
             return
         self._stop_player()
-        media, ffmpeg, workdir = self.media, self.tools.ffmpeg, self.workdir
-        vocals = self.stems.vocals if self.stems and self.source_mode.currentIndex() == 1 else None
-        self._generating_vocals = vocals is not None
         if self._edited_notes is not None and QMessageBox.question(
             self, "重新识别", "重新识别将替换手动修正的音符，继续？"
         ) != QMessageBox.StandardButton.Yes:
             return
+        media, tools, workdir, existing_stems = self.media, self.tools, self.workdir, self.stems
+        mode = self.source_mode.currentData()
+        vocals = existing_stems.vocals if existing_stems and mode == "vocals" else None
+        destination = None
+        if mode == "auto" and existing_stems is None and tools.demucs_python:
+            destination = self._prepare_stems()
         self._revision += 1
         revision = self._revision
 
         def generate(cancel, progress):
-            analysis = analyze_media(media, ffmpeg=ffmpeg, find_beats=True, workdir=workdir,
-                                     cancel=cancel, progress=progress, vocals=vocals, verify_pitch=True)
-            progress("正在生成简谱…")
-            beat = analysis.beat
-            score = build_score(analysis.notes, ScoreSettings(beat.bpm, beat.first_beat_s), revision)
-            return analysis, score
+            def build(source, beat=None):
+                analysis = analyze_media(media, ffmpeg=tools.ffmpeg, find_beats=beat is None, workdir=workdir,
+                                         cancel=cancel, progress=progress, vocals=source, verify_pitch=True)
+                if beat is not None:
+                    analysis = replace(analysis, beat=beat)
+                progress("正在生成简谱…")
+                beat = analysis.beat
+                score = build_score(analysis.notes, ScoreSettings(beat.bpm, beat.first_beat_s), revision)
+                return GeneratedScore(analysis, score, from_vocals=source is not None)
+
+            result = build(vocals)
+            overlap = _overlap_fraction(result.score)
+            if mode != "auto" or overlap <= HEAVY_OVERLAP:
+                return result
+            stems = existing_stems
+            try:
+                if stems is None:
+                    if destination is None:
+                        notice = ("无法创建分轨缓存。" if tools.demucs_python
+                                  else "可在工具设置中配置 Demucs 自动分离人声。")
+                        return replace(result, notice=notice)
+                    progress("检测到较多重叠音，正在分离人声与伴奏…")
+                    stems = separate(media, destination, python=tools.demucs_python, ffmpeg=tools.ffmpeg, cancel=cancel)
+                vocal_result = build(stems.vocals, result.analysis.beat)
+            except NoteFlowError as error:
+                LOG.info("Automatic vocal analysis: %s %s", error.stage, error.code)
+                return replace(result, notice=f"自动分离制谱未完成。{error}")
+            # Require a substantial vocal melody with fewer competing notes.
+            if (_overlap_fraction(vocal_result.score) < overlap
+                    and _melody_duration(vocal_result.score) >= _melody_duration(result.score) / 2):
+                return replace(vocal_result, stems=stems)
+            return replace(result, notice="分离后可用的人声旋律不足，已使用原曲。")
 
         self._start("正在生成简谱…", generate, self._generated)
 
-    def _generated(self, result):
-        self.analysis, score = result
+    def _generated(self, result: GeneratedScore):
+        self.analysis = result.analysis
+        if result.stems is not None:
+            self.stems = result.stems
+        elif self.stems is None:
+            self._clear_stems()
         self._edited_notes = None
         self._undo.clear()
         self._redo.clear()
-        self._analysis_vocals = self._generating_vocals
+        self._analysis_vocals = result.from_vocals
         self._show_media(self.analysis.duration_s)
-        self._publish_score(score, calibrated=self.analysis.beat.reliable)
+        self._publish_score(result.score, calibrated=self.analysis.beat.reliable, notice=result.notice)
         self._mark_dirty()
 
-    def _publish_score(self, score, *, calibrated=True):
+    def _publish_score(self, score, *, calibrated=True, notice=""):
         self.score = score
         self.score_view.set_score(score)
         self._refresh_editor()
@@ -317,9 +369,9 @@ class MainWindow(QMainWindow):
         message = f"{source}简谱，{len(score.measures)} 小节，{len(score.grid.notes)} 个音符。"
         if not calibrated:
             message += "拍点证据不足，当前使用 120 BPM，请手动校准。"
-        if self.analysis.notes and score.grid.overlap_drops / len(self.analysis.notes) > 0.3:
+        if _overlap_fraction(score) > HEAVY_OVERLAP:
             message += "重叠音较多，可能含伴奏或和弦。"
-        self._status(message)
+        self._status(message + notice)
 
     def apply_calibration(self):
         if self.score is None or self._thread is not None:
@@ -354,22 +406,27 @@ class MainWindow(QMainWindow):
         if not self.tools.demucs_python:
             self._status("请先在工具设置中选择已安装 Demucs 的 Python。")
             return
-        try:
-            self._stem_workspace = TemporaryDirectory(prefix="tracks-", dir=self.workdir, ignore_cleanup_errors=True)
-        except OSError:
+        destination = self._prepare_stems()
+        if destination is None:
             self._status("无法创建分轨工作目录，请检查缓存目录和磁盘空间。")
             return
         self._stop_player()
-        destination = Path(self._stem_workspace.name) / "stems"
         media, tools = self.media, self.tools
         self._start("正在分离人声与伴奏，首次运行会下载模型…",
                     lambda cancel, _: separate(media, destination, python=tools.demucs_python,
                                                ffmpeg=tools.ffmpeg, cancel=cancel),
                     self._tracks_ready)
 
+    def _prepare_stems(self) -> Path | None:
+        try:
+            self._stem_workspace = TemporaryDirectory(prefix="tracks-", dir=self.workdir, ignore_cleanup_errors=True)
+        except OSError:
+            return None
+        return Path(self._stem_workspace.name) / "stems"
+
     def _tracks_ready(self, stems):
         self.stems = stems
-        self.source_mode.setCurrentIndex(1)
+        self.source_mode.setCurrentIndex(self.source_mode.findData("vocals"))
         self._mark_dirty()
         self._status("人声与伴奏已分离，可以分别播放。生成简谱将识别人声。")
 
@@ -524,7 +581,7 @@ class MainWindow(QMainWindow):
         self._undo.clear()
         self._redo.clear()
         self._dirty = self._analysis_vocals = False
-        self.source_mode.setCurrentIndex(0)
+        self.source_mode.setCurrentIndex(self.source_mode.findData("auto"))
         self.source_label.hide()
         self.calibration_toggle.setChecked(False)
         self.score_view.set_media_available(False)
@@ -579,7 +636,7 @@ class MainWindow(QMainWindow):
             self._edited_notes = project.edited_notes
             self._analysis_vocals = project.vocal_score
             self.instrument.setCurrentText(project.instrument)
-            self.source_mode.setCurrentIndex(1 if project.vocal_score else 0)
+            self.source_mode.setCurrentIndex(self.source_mode.findData("vocals" if project.vocal_score and project.stems else "auto"))
             if project.score:
                 self._publish_score(project.score)
             self._dirty = False
@@ -826,8 +883,8 @@ class MainWindow(QMainWindow):
 
     def show_help(self):
         QMessageBox.information(self, "使用说明",
-            "1. 导入音频或视频。歌曲混音可先分离人声与伴奏。\n"
-            "2. 选择识别来源，生成简谱，再校准速度、首拍和主音。\n"
+            "1. 导入音频或视频，点击生成简谱。已配置 Demucs 时，自动模式会对重叠音较多的音轨尝试分离人声。\n"
+            "2. 可手动选择原曲或已分离的人声，再校准速度、首拍和主音。\n"
             "3. 在音符编辑页修正音高、起止时间和力度，Ctrl+Z 可撤销。\n"
             "4. 播放时可暂停、拖动进度、调整速度。点击谱面音符可定位。\n"
             "5. Ctrl+S 保存项目。项目包含原曲、分轨和音符，可离线恢复。\n\n"
