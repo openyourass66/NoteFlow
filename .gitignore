@@ -1,13 +1,28 @@
+# Python 虚拟环境、缓存和测试产物
 /.venv*/
+/venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# 本地工具与构建产物
 /.tools/
 /.poc-output/
 /build/
 /dist/
-__pycache__/
-.pytest_cache/
-*.egg-info/
+
+# 本地音源、媒体、项目和导出产物
 *.sf2
 *.wav
 *.mp3
 *.mp4
 *.m4a
+*.noteflow
+.noteflow-*
+*.mid
+*.midi
+
+# Windows 生成的文件
+Thumbs.db
+Desktop.ini

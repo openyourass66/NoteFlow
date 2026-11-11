@@ -1,18 +1,47 @@
 # NoteFlow
 
-NoteFlow 是 Windows 本地制谱工作台，支持音频导入、人声分离、旋律识别、数字简谱、音符编辑和项目保存。
+NoteFlow 是面向 Windows x64 的本地制谱工具。它从音频或视频中提取主旋律并生成数字简谱，支持逐音编辑、原曲对照试听、项目保存，以及 TXT、MIDI 和 WAV 导出。
 
-## 启动桌面版
+## 安装与启动
 
-打开 `dist\NoteFlow\NoteFlow.exe`，并保留同目录的 `_internal`。在本项目内运行时，程序会自动查找 `.tools` 里的工具和音源。移到其他位置时，可把工具放在程序旁的 `tools` 文件夹、将可执行文件加入 `PATH`，或从右上角「⋯」菜单打开「工具设置」指定路径。FluidSynth 和本地 GM SoundFont（`.sf2`）用于试听。
+准备 Python 3.11 x64。在项目根目录打开 PowerShell，创建虚拟环境并启动桌面版。
 
-在已准备好 `.venv-m0` 和 `.tools` 的开发目录，可直接运行 `& .\.venv-m0\Scripts\python.exe -m noteflow`。源码启动会查找项目 `.tools` 中的本地工具。新环境使用 Python 3.11 x64，运行 `python -m pip install -c .\poc\requirements-win-x64.lock -e '.[desktop]'` 后用 `python -m noteflow` 启动。
+```powershell
+py -3.11 -m venv .venv
+$nfPython = '.\.venv\Scripts\python.exe'
+& $nfPython -m pip install -c .\poc\requirements-win-x64.lock -e '.[desktop]'
+& $nfPython -m noteflow
+```
 
-1. 打开或拖入 PCM WAV、MP3 或含 AAC 音轨的 MP4 / M4A。导入后可点击「播放原曲」听首条音轨。清唱或独奏可直接点「生成简谱」。歌曲混音可先点「分离人声与伴奏」，分别播放两条音轨，再从人声生成简谱。扩展名误标为 `.mp3` 的 M4A 可直接导入。
-2. 查看谱面，需要时展开「节奏与调号」，修改 BPM、首拍偏移或主音，再点击「应用校准」。
-3. 选择钢琴、尼龙吉他或小提琴。「试听旋律」保留识别音符的起止时间，「播放简谱」按谱面节奏播放。可导出当前简谱的 UTF-8 TXT 和 MIDI。
+| 功能 | 需准备的工具 |
+| --- | --- |
+| 导入、解码和识别 | FFmpeg 与 ffprobe |
+| 合成旋律或简谱的试听和 WAV 导出 | FluidSynth 与 GM SoundFont（`.sf2`） |
+| 分离人声与伴奏 | 安装了 Demucs 的独立 Python 环境 |
 
-简谱采用固定 4/4 拍和恒定速度。单文件上限为 200 MB，首条音轨上限为 120 秒。分离后从原曲估计拍点，从人声识别音符，并用 pYIN 的基频轨迹复核八度。人声轨可能同时包含和声及少量伴奏残留。分轨随当前导入保留，换曲或关闭窗口时清理。识别期间取消会等待当前推理结束。
+桌面版会查找项目根目录下的 `.tools`，也可从 `PATH` 查找 FFmpeg、ffprobe 和 FluidSynth，或在右上角「⋯ → 工具设置」指定工具和音源路径。可将 `.sf2` 直接放入 `.tools`。工具来源见 [第三方组件与外部工具](docs/third-party.md)。
+
+已有目录包时，双击 `dist\NoteFlow\NoteFlow.exe`，保留同目录的 `_internal`。将目录包移出项目后，可把外部工具和音源放到 `NoteFlow.exe` 旁的 `tools` 文件夹。自行构建目录包见下方的「开发与打包」。
+
+## 桌面工作台
+
+1. **导入媒体**。点击顶部「导入媒体…」或将文件拖入窗口。支持 PCM WAV、MP3 和含 AAC 音轨的 MP4 / M4A。处理首条音轨，单文件最大 200 MB，音轨最长 120 秒。
+2. **生成简谱**。清唱或独奏选择「原曲 / 独奏」。歌曲混音可先点「分离人声与伴奏」，再选择「分离人声」。从分离人声制谱时，程序从原曲估计拍点，并用 pYIN 复核人声旋律的八度。
+3. **校准和编辑**。在谱面上方展开「节奏与调号」，修改 BPM、首拍偏移或主音后应用。切换到「音符编辑」，双击单元格可调整音符起止时间、MIDI 音高和力度，也可添加、删除音符或升降半音和八度。音符编辑和节奏校准支持撤销与重做。
+4. **对照试听**。底部可播放原曲、分离人声、伴奏、旋律和简谱。选用钢琴、尼龙吉他或小提琴后，「试听旋律」按音符的起止时间播放，「播放简谱」按量化后的谱面节奏播放。播放时可暂停、拖动进度、调整音量和 0.5–1.5 倍速，也可点击谱面音符定位。
+5. **保存或导出**。「保存项目」生成 `.noteflow` 文件，保存解码后的原曲、已有分轨、识别结果、手工修正、谱面设置和音色。可从顶部「打开项目…」或「⋯ → 最近项目」恢复，无需原始媒体。「导出」菜单可生成 UTF-8 TXT、MIDI，以及已有分轨或合成音轨的 WAV。
+
+简谱采用固定 4/4 拍和恒定速度，适合清晰的单声部旋律。混音分离后的人声轨可能仍含和声或伴奏残留。
+
+| 操作 | 快捷键 |
+| --- | --- |
+| 导入媒体 / 打开项目 | `Ctrl+O` / `Ctrl+Shift+O` |
+| 保存项目 / 另存为 | `Ctrl+S` / `Ctrl+Shift+S` |
+| 生成简谱 / 取消任务 | `Ctrl+G` / `Esc` |
+| 切换简谱与音符编辑 | `Ctrl+Tab` |
+| 撤销 / 重做 | `Ctrl+Z` / `Ctrl+Y` |
+
+「⋯ → 使用说明」可查看工作台内的操作提示。取消识别时，程序会等待当前推理结束。
 
 ### 安装可选的人声分离环境
 
@@ -27,47 +56,31 @@ $nfDemucsPython = '.\.tools\demucs\Scripts\python.exe'
 
 首次分离会联网下载约 84 MB 的 HT Demucs 模型权重。推理在本地 CPU 上运行。环境安装在其他位置时，在「工具设置」的「Demucs Python」一栏选择该环境的 `python.exe`。
 
-## 桌面工作台
+## 命令行识别
 
-- 左侧导入音频或打开项目，可从最近项目继续工作。选择「识别来源」后生成简谱。
-- 「音符编辑」页可双击修改起止秒数、MIDI 音高和力度，也可添加、删除音符或调整半音、八度。时间调整会检查音轨边界和音符重叠。撤销和重做覆盖音符修改及节奏校准。
-- 播放区支持原曲、人声、伴奏、旋律和简谱的对照试听，以及暂停、定位、0.5–1.5 倍速和音量调整。播放时谱面高亮当前音符，点击谱面音符可定位。
-- 「保存项目」生成 `.noteflow` 文件，包含解码后的原曲、已有分轨、识别候选音符、手工修正、速度、调号和音色。项目可离线重新打开，原始媒体移动后仍可恢复。换曲和关闭窗口会提示保存未保存内容。
-- 可导出 TXT、MIDI，以及人声、伴奏、合成旋律或简谱的 WAV 音频。音频合成使用工具设置中的 FluidSynth 和 SoundFont。
-
-快捷键为 Ctrl+O 导入音频、Ctrl+Shift+O 打开项目、Ctrl+S 保存、Ctrl+Shift+S 另存为、Ctrl+Z 撤销、Ctrl+Y 重做。菜单「帮助 → 使用说明」提供操作提示。
-
-## 识别自己的文件
-
-命令行入口沿用同一套探测、解码和 ONNX CPU 识别流程，输出秒级音符 JSON。
-
-在项目根目录运行以下 PowerShell 命令。已有 `.venv-m0` 时可复用其中的依赖。将媒体路径和工具目录改成实际位置。
+使用安装步骤中的 `$nfPython`，将示例中的媒体和工具路径替换为实际位置。FFmpeg 和 ffprobe 已在 `PATH` 上时，可省略两个工具参数。
 
 ```powershell
-$nfPython = '.\.venv-m0\Scripts\python.exe'
-& $nfPython -m pip install --no-deps --no-build-isolation -e .
-
-$nfFfmpeg = '.\.tools\ffmpeg\ffmpeg-9.0.2-essentials_build\bin'
-& $nfPython -m noteflow 'D:\Music\旋律.mp4' `
-    --ffmpeg (Join-Path $nfFfmpeg 'ffmpeg.exe') `
-    --ffprobe (Join-Path $nfFfmpeg 'ffprobe.exe')
+& $nfPython -m noteflow 'C:\Music\旋律.mp4' `
+    --ffmpeg 'C:\tools\ffmpeg\bin\ffmpeg.exe' `
+    --ffprobe 'C:\tools\ffmpeg\bin\ffprobe.exe'
 ```
 
-新环境使用 Python 3.11 x64，创建虚拟环境后运行 `python -m pip install -c .\poc\requirements-win-x64.lock -e .`。该命令用 M0 的版本锁约束 CLI 所需依赖。如果 FFmpeg 和 ffprobe 已在 `PATH` 上，可以省略两个工具路径参数。
+只使用命令行时，安装命令可用 `-e .` 省去桌面依赖。
 
 标准输出为 UTF-8 JSON，包含音轨索引、实际解码时长和候选音符。音符含起止秒数、MIDI 音高、模型幅值和力度。添加 `--demucs-python $nfDemucsPython` 可先分离人声，再输出经八度复核的人声候选音符。
 
 ## 开发与打包
 
-媒体探测、识别、节奏和制谱使用普通函数与数据类。Qt 窗口一次运行一个后台任务。`Score` 同时保留按时间筛出的旋律和量化后的谱面，校准复用识别结果。
-
-完整回归需安装 `.[desktop,test]`，将 FFmpeg 和 ffprobe 加入 `PATH` 后运行 `python -m pytest`。本机有 FluidSynth、SF2 和音频输出设备时，桌面回归也会验证三种音色的播放与停止。
+将 FFmpeg 和 ffprobe 加入 `PATH` 后，在项目根目录运行测试。打包使用同一份 Windows 依赖锁文件约束 PyInstaller 的版本。
 
 ```powershell
-& .\.venv-m0\Scripts\python.exe -m PyInstaller --noconfirm .\packaging\noteflow.spec
+& $nfPython -m pip install -c .\poc\requirements-win-x64.lock -e '.[desktop,test]' pyinstaller
+& $nfPython -m pytest
+& $nfPython -m PyInstaller --noconfirm .\packaging\noteflow.spec
 ```
 
-[第三方组件与外部工具](docs/third-party.md) · [验收记录](docs/acceptance.md)
+构建输出在 `dist\NoteFlow`。将测试或试听生成的个人媒体、项目与导出文件保存在工作区外，或使用项目根目录下已被忽略的 `.poc-output`。历史测试结果见 [Windows 验收记录](docs/acceptance.md)。
 
 ## 运行 M0
 
