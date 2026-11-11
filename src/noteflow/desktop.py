@@ -151,6 +151,7 @@ class MainWindow(QMainWindow):
         for control in (self.vocals_button, self.accompaniment_button):
             control.setEnabled(not busy and self.stems is not None)
         self.cancel_button.setEnabled(busy and not self._cancel.is_set())
+        self.cancel_button.setVisible(busy)
         for control in (self.bpm, self.offset, self.key, self.apply_button,
                         self.instrument, self.melody_button, self.play_button, self.txt_button, self.midi_button):
             control.setEnabled(ready and not busy)
@@ -843,6 +844,7 @@ class MainWindow(QMainWindow):
 
 def main(source: Path | None = None) -> int:
     app = QApplication(["NoteFlow"])
+    app.setStyle("Fusion")
     app.setApplicationName("NoteFlow")
     app.setOrganizationName("NoteFlow")
     try:

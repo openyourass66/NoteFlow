@@ -1,14 +1,14 @@
 """Draw numbered notation using the active Qt palette."""
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QFontMetrics, QPainter, QPainterPath, QPalette
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import QWidget
 
 from .score import KEYS, Score, to_text
 
 
 class ScoreView(QWidget):
-    MARGIN = 24
+    MARGIN = 32
     note_clicked = Signal(str)
 
     def __init__(self):
@@ -48,9 +48,9 @@ class ScoreView(QWidget):
     def _layout(self):
         metrics = QFontMetrics(self._notation_font())
         slot = max(27, metrics.horizontalAdvance("♭7") + 8)
-        row_height = max(90, metrics.height() + 56)
+        row_height = max(104, metrics.height() + 64)
         limit = self.width() - self.MARGIN
-        x, y = self.MARGIN, 73
+        x, y = self.MARGIN, 96
         tokens, bars = [], []
         for index, measure in enumerate(self.score.measures, 1):
             width = sum(slot * (1 + {960: 1, 1920: 3}.get(token.duration_tick, 0)) for token in measure) + 14
@@ -83,11 +83,35 @@ class ScoreView(QWidget):
         text = palette.color(QPalette.ColorRole.Text)
         painter.setPen(text)
         if not self.score:
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "打开或拖入 WAV、MP3、MP4、M4A，再点击生成简谱")
+            center = self.rect().center()
+            x, y = center.x(), center.y() - 52
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#eef4ed"))
+            painter.drawRoundedRect(QRectF(x - 32, y - 40, 64, 64), 18, 18)
+            painter.setPen(QPen(QColor("#468269"), 2.5))
+            painter.drawLine(QPointF(x + 7, y - 24), QPointF(x + 7, y + 3))
+            painter.drawLine(QPointF(x + 7, y - 24), QPointF(x + 18, y - 18))
+            painter.setBrush(QColor("#468269"))
+            painter.drawEllipse(QRectF(x - 6, y - 1, 13, 9))
+            font = QFont(self.font())
+            font.setPixelSize(21)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(text)
+            painter.drawText(QRectF(0, y + 48, self.width(), 34), Qt.AlignmentFlag.AlignCenter,
+                             "导入音乐，生成简谱")
+            font.setPixelSize(13)
+            font.setBold(False)
+            painter.setFont(font)
+            painter.setPen(QColor("#78857b"))
+            painter.drawText(QRectF(0, y + 91, self.width(), 26), Qt.AlignmentFlag.AlignCenter,
+                             "拖入音频或视频，或从左侧打开项目")
             return
 
         settings = self.score.settings
-        painter.drawText(self.MARGIN, 30, f"1={KEYS[settings.tonic_pc]}     4/4     BPM = {settings.bpm:g}")
+        painter.setPen(QColor("#78857b"))
+        painter.drawText(self.MARGIN, 38, f"1={KEYS[settings.tonic_pc]}     4/4     BPM = {settings.bpm:g}")
+        painter.setPen(text)
         tokens, bars, _ = self._layout()
         for index, start, end, y in bars:
             painter.drawText(QPointF(start, y - 23), str(index))
