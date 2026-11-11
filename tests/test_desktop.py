@@ -7,8 +7,9 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtMultimedia import QMediaDevices
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from noteflow import desktop
@@ -53,6 +54,30 @@ def window(app, tmp_path, monkeypatch):
     wait_for(app, lambda: window._thread is None and not window.isVisible())
 
 
+def test_toolbar_preserves_file_shortcuts_and_recent_projects(app, tmp_path, monkeypatch):
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    recent = tmp_path / "曲目 & 项目.noteflow"
+    settings.setValue("projects/recent", [str(recent)])
+    opened = []
+    monkeypatch.setattr(desktop.MainWindow, "open_source", lambda self, path: opened.append(Path(path)))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **kw: (str(recent), ""))
+    window = desktop.MainWindow(tmp_path, settings=settings)
+    window.show()
+    window.activateWindow()
+    app.processEvents()
+    try:
+        QTest.keyClick(window, Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+        assert opened == [recent]
+        action, = window.recent_menu.actions()
+        assert action.text() == "曲目 && 项目"
+        action.trigger()
+        assert opened == [recent, recent]
+        QTest.keyClick(window, Qt.Key.Key_Tab, Qt.KeyboardModifier.ControlModifier)
+        assert window.note_table.isVisible()
+    finally:
+        window.close()
+
+
 def test_desktop_generates_calibrates_and_exports(app, window, tmp_path, monkeypatch):
     source = tmp_path / "旋律 样本.wav"
     write_wave(source, 10, melody())
@@ -77,9 +102,10 @@ def test_desktop_generates_calibrates_and_exports(app, window, tmp_path, monkeyp
 
     import mido
 
-    for button, path in ((window.txt_button, tmp_path / "导出.txt"), (window.midi_button, tmp_path / "导出.mid")):
+    for action, path in ((window.txt_action, tmp_path / "导出.txt"), (window.midi_action, tmp_path / "导出.mid")):
         monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (str(path), ""))
-        button.click()
+        assert action.isEnabled()
+        action.trigger()
         assert path.is_file(), window.status.text()
     assert (tmp_path / "导出.txt").read_text(encoding="utf-8") == to_text(window.score)
     assert mido.MidiFile(tmp_path / "导出.mid").tracks[0][2].key == "D"
@@ -274,7 +300,7 @@ def test_project_restores_edited_notes_and_audio_after_original_is_removed(app, 
     wait_for(app, lambda: window._thread is None)
     assert window.project_path == project and window.media.path.is_file(), window.status.text()
     assert window.score.melody == edited and not window._dirty
-    assert window.recent.count() == 1
+    assert len(window.recent_menu.actions()) == 1
     window.bpm.setValue(100)
     window.apply_calibration()
     wait_for(app, lambda: window._thread is None)

@@ -15,14 +15,22 @@ class ScoreView(QWidget):
         super().__init__()
         self.score: Score | None = None
         self.active_note = None
+        self._empty_message = "将音频或视频拖到这里"
         self._reflow_timer = QTimer(self)
         self._reflow_timer.setSingleShot(True)
         self._reflow_timer.timeout.connect(self._reflow)
         self.setAccessibleName("数字简谱")
+        self.setAccessibleDescription(self._empty_message)
+
+    def set_media_available(self, available):
+        self._empty_message = "点击「生成简谱」开始识别" if available else "将音频或视频拖到这里"
+        if self.score is None:
+            self.setAccessibleDescription(self._empty_message)
+            self.update()
 
     def set_score(self, score: Score | None):
         self.score = score
-        self.setAccessibleDescription(to_text(score) if score else "导入媒体后生成简谱")
+        self.setAccessibleDescription(to_text(score) if score else self._empty_message)
         self._reflow_timer.start()
         self.update()
 
@@ -84,32 +92,25 @@ class ScoreView(QWidget):
         painter.setPen(text)
         if not self.score:
             center = self.rect().center()
-            x, y = center.x(), center.y() - 52
+            x, y = center.x(), center.y() - 24
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#eef4ed"))
-            painter.drawRoundedRect(QRectF(x - 32, y - 40, 64, 64), 18, 18)
-            painter.setPen(QPen(QColor("#468269"), 2.5))
+            painter.setBrush(QColor("#edf5f2"))
+            painter.drawRoundedRect(QRectF(x - 27, y - 35, 54, 54), 14, 14)
+            painter.setPen(QPen(QColor("#377662"), 2.3))
             painter.drawLine(QPointF(x + 7, y - 24), QPointF(x + 7, y + 3))
             painter.drawLine(QPointF(x + 7, y - 24), QPointF(x + 18, y - 18))
-            painter.setBrush(QColor("#468269"))
+            painter.setBrush(QColor("#377662"))
             painter.drawEllipse(QRectF(x - 6, y - 1, 13, 9))
             font = QFont(self.font())
-            font.setPixelSize(21)
-            font.setBold(True)
+            font.setPixelSize(15)
             painter.setFont(font)
-            painter.setPen(text)
-            painter.drawText(QRectF(0, y + 48, self.width(), 34), Qt.AlignmentFlag.AlignCenter,
-                             "导入音乐，生成简谱")
-            font.setPixelSize(13)
-            font.setBold(False)
-            painter.setFont(font)
-            painter.setPen(QColor("#78857b"))
-            painter.drawText(QRectF(0, y + 91, self.width(), 26), Qt.AlignmentFlag.AlignCenter,
-                             "拖入音频或视频，或从左侧打开项目")
+            painter.setPen(QColor("#566773"))
+            painter.drawText(QRectF(0, y + 32, self.width(), 24), Qt.AlignmentFlag.AlignCenter,
+                             self._empty_message)
             return
 
         settings = self.score.settings
-        painter.setPen(QColor("#78857b"))
+        painter.setPen(QColor("#566773"))
         painter.drawText(self.MARGIN, 38, f"1={KEYS[settings.tonic_pc]}     4/4     BPM = {settings.bpm:g}")
         painter.setPen(text)
         tokens, bars, _ = self._layout()

@@ -16,8 +16,7 @@ from uuid import uuid4
 from PySide6.QtCore import QObject, QSettings, QStandardPaths, QThread, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QInputDialog, QLabel, QListWidgetItem, QMainWindow,
-    QMessageBox, QPushButton, QTableWidgetItem,
+    QApplication, QFileDialog, QInputDialog, QMainWindow, QMessageBox, QTableWidgetItem,
 )
 
 from .analysis import analyze_media
@@ -92,7 +91,7 @@ class MainWindow(QMainWindow):
         self._preview_path = self._player = self._playing = None
         self._audio = QAudioOutput(self)
         self._audio.setVolume(0.65)
-        self.setWindowTitle("NoteFlow · 旋律简谱")
+        self.setWindowTitle("NoteFlow")
         self.setAcceptDrops(True)
         self.resize(1220, 820)
         self.setMinimumSize(1000, 680)
@@ -108,52 +107,39 @@ class MainWindow(QMainWindow):
     def _build_interface(self):
         build_interface(self)
 
-    @staticmethod
-    def _button(layout, text, action):
-        button = QPushButton(text)
-        button.setMinimumHeight(44)
-        button.clicked.connect(action)
-        layout.addWidget(button)
-        return button
-
-    @staticmethod
-    def _field(layout, text, widget):
-        label = QLabel(text)
-        label.setBuddy(widget)
-        widget.setMinimumHeight(44)
-        widget.setAccessibleName(text)
-        layout.addWidget(label)
-        layout.addWidget(widget)
-
     def _update_offset_limit(self):
         limit_ms = math.ceil(ScoreSettings(self.bpm.value()).tempo_us / 1000) - 1
         self.offset.setMaximum(limit_ms / 1000)
 
     def _sync_controls(self):
         busy, ready = self._thread is not None, self.score is not None
+        media_ready = not busy and self.media is not None
+        export_ready = not busy and (ready or self.stems is not None)
         self.open_button.setEnabled(not self._closing)
-        self.settings_button.setEnabled(not busy)
-        self.generate_button.setEnabled(not busy and self.media is not None)
+        self.settings_action.setEnabled(not busy)
+        self.generate_button.setEnabled(media_ready)
         self.open_project_button.setEnabled(not self._closing)
-        self.save_button.setEnabled(not busy and self.media is not None)
-        self.source_mode.setEnabled(not busy and self.media is not None)
+        self.save_button.setEnabled(media_ready)
+        self.save_as_action.setEnabled(media_ready)
+        self.source_mode.setEnabled(media_ready)
         self.source_mode.model().item(1).setEnabled(self.stems is not None)
-        self.recent.setEnabled(not self._closing)
+        self.recent_menu.menuAction().setEnabled(not self._closing)
         self.note_table.setEnabled(ready and not busy)
         for control in (self.add_note_button, self.delete_note_button, self.lower_button,
                         self.higher_button, self.down_octave_button, self.up_octave_button):
             control.setEnabled(ready and not busy)
         self.undo_button.setEnabled(bool(self._undo) and not busy)
         self.redo_button.setEnabled(bool(self._redo) and not busy)
-        self.audio_export_button.setEnabled(not busy and (ready or self.stems is not None))
+        self.export_button.setEnabled(export_ready)
+        self.audio_export_action.setEnabled(export_ready)
         self.original_button.setEnabled(not busy and self.media is not None)
         self.separate_button.setEnabled(not busy and self.media is not None and self.stems is None)
         for control in (self.vocals_button, self.accompaniment_button):
             control.setEnabled(not busy and self.stems is not None)
         self.cancel_button.setEnabled(busy and not self._cancel.is_set())
         self.cancel_button.setVisible(busy)
-        for control in (self.bpm, self.offset, self.key, self.apply_button,
-                        self.instrument, self.melody_button, self.play_button, self.txt_button, self.midi_button):
+        for control in (self.bpm, self.offset, self.key, self.calibration_toggle, self.apply_button,
+                        self.instrument, self.melody_button, self.play_button, self.txt_action, self.midi_action):
             control.setEnabled(ready and not busy)
         self.stop_button.setEnabled(self._player is not None)
         self.pause_button.setEnabled(self._player is not None)
@@ -268,11 +254,14 @@ class MainWindow(QMainWindow):
         self.source_name = media.path.name
         self._update_title()
         self._show_media(media.duration_s)
-        self._status("音轨已就绪。歌曲混音可先分离人声与伴奏，清唱或独奏可直接生成简谱。")
+        self._status("音轨已导入。")
 
     def _show_media(self, duration):
         length = f"{duration:.2f} 秒" if duration is not None else "时长待解码确认"
-        self.source_label.setText(f"{self.source_name}   ·   {length}")
+        self.source_label.setText(f"源音轨 · {length}")
+        self.source_label.setToolTip(self.source_name)
+        self.source_label.show()
+        self.score_view.set_media_available(True)
 
     def generate(self):
         if self.media is None or self._thread is not None:
@@ -494,9 +483,10 @@ class MainWindow(QMainWindow):
             self._status(f"已导出 {path.name}。")
 
     def _update_title(self):
-        title = self.project_path.stem if self.project_path else (Path(self.source_name).stem or "新的音乐项目")
-        self.project_label.setText(title + (" · 未保存" if self._dirty else ""))
-        self.setWindowTitle(f"{title}{' *' if self._dirty else ''} — NoteFlow")
+        title = self.project_path.stem if self.project_path else Path(self.source_name).stem
+        if title:
+            title += (" · 未保存" if self._dirty else "") + " — "
+        self.setWindowTitle(title + "NoteFlow")
 
     def _mark_dirty(self):
         self._dirty = True
@@ -526,17 +516,22 @@ class MainWindow(QMainWindow):
         self._redo.clear()
         self._dirty = self._analysis_vocals = False
         self.source_mode.setCurrentIndex(0)
+        self.source_label.hide()
+        self.calibration_toggle.setChecked(False)
+        self.score_view.set_media_available(False)
         self.score_view.set_score(None)
         self._refresh_editor()
 
     def _load_recent(self):
         paths = self.settings.value("projects/recent", [], list)
-        self.recent.clear()
-        for path in paths[:8]:
-            item = QListWidgetItem(Path(path).stem)
-            item.setToolTip(path)
-            item.setData(Qt.ItemDataRole.UserRole, path)
-            self.recent.addItem(item)
+        menu = self.recent_menu
+        menu.clear()
+        metrics = menu.fontMetrics()
+        for recent in map(Path, paths[:8]):
+            name = metrics.elidedText(recent.stem, Qt.TextElideMode.ElideMiddle, 360).replace("&", "&&")
+            action = menu.addAction(name, lambda _checked=False, path=recent: self.open_source(path))
+            action.setToolTip(str(recent))
+        menu.menuAction().setVisible(bool(paths))
 
     def _remember_project(self, path):
         paths = self.settings.value("projects/recent", [], list)
