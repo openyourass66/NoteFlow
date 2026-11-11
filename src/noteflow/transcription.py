@@ -10,6 +10,7 @@ from .errors import NoteFlowError
 from .media import AudioAsset, SAMPLE_RATE
 from .notes import NoteEvent
 from .process import check_cancelled
+from .score import monophonic
 
 
 @lru_cache(maxsize=1)
@@ -41,21 +42,55 @@ def _convert_events(events, duration_s: float) -> tuple[NoteEvent, ...]:
     return tuple(sorted(notes, key=lambda note: note.start_s))
 
 
-def transcribe(audio: AudioAsset) -> tuple[NoteEvent, ...]:
+def _predict(audio: AudioAsset, minimum_note_ms: float):
     if not audio.has_signal:
         raise NoteFlowError("NO_NOTES", "transcribe", "音轨为空或静音，请选择有声音的片段。")
     model, predict = _load_model()
     try:
-        _, _, events = predict(
+        output, _, events = predict(
             audio.path, model_or_model_path=model, onset_threshold=0.5,
-            frame_threshold=0.3, minimum_note_length=127.70,
+            frame_threshold=0.3, minimum_note_length=minimum_note_ms,
         )
-        notes = _convert_events(events, audio.duration_s)
+        return output, _convert_events(events, audio.duration_s)
     except Exception as exc:
         raise NoteFlowError("INFERENCE_FAILED", "transcribe", "音高识别失败，请尝试其他片段。") from exc
+
+
+def _require_notes(notes: tuple[NoteEvent, ...]) -> tuple[NoteEvent, ...]:
     if not notes:
         raise NoteFlowError("NO_NOTES", "transcribe", "未识别到可靠音符，请尝试更清晰的单声部片段。")
     return notes
+
+
+def transcribe(audio: AudioAsset) -> tuple[NoteEvent, ...]:
+    _, notes = _predict(audio, minimum_note_ms=127.70)
+    return _require_notes(notes)
+
+
+def transcribe_melody(
+    audio: AudioAsset, cancel: Event | None = None, *, isolated: bool = False,
+) -> tuple[tuple[NoteEvent, ...], float]:
+    check_cancelled(cancel)
+    output, candidates = _predict(audio, minimum_note_ms=80)
+    check_cancelled(cancel)
+    import librosa
+    import numpy as np
+    from basic_pitch.constants import FFT_HOP
+    from basic_pitch.note_creation import MIDI_OFFSET, model_frames_to_time
+
+    from .melody import melody_events
+
+    frames, onsets = output["note"], output["onset"]
+    times = model_frames_to_time(len(frames) + 1)
+    samples, _ = librosa.load(audio.path, sr=SAMPLE_RATE, mono=True)
+    rms = librosa.feature.rms(y=samples, frame_length=1024, hop_length=FFT_HOP)[0]
+    rms_times = librosa.frames_to_time(np.arange(len(rms)), sr=SAMPLE_RATE, hop_length=FFT_HOP)
+    aligned_rms = np.interp(times[:-1], rms_times, rms)
+    events = melody_events(frames, onsets, aligned_rms, times, MIDI_OFFSET, isolated=isolated, cancel=cancel)
+    notes = _convert_events(events, audio.duration_s)
+    candidate_melody = monophonic(candidates)
+    competing = (len(candidates) - len(candidate_melody)) / max(1, len(candidates))
+    return _require_notes(notes or candidates), competing
 
 
 def refine_octaves(audio: AudioAsset, notes: tuple[NoteEvent, ...],

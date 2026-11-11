@@ -253,14 +253,16 @@ def test_mixed_song_generation_uses_available_vocal_melody(app, window, tmp_path
     window.tools = replace(window.tools, demucs_python="" if mode == "no_demucs" else "test-python")
     lead = tuple(NoteEvent(f"v{i}", i * 0.5, i * 0.5 + 0.45, pitch, 0.5, 80)
                  for i, pitch in enumerate((69, 67, 64, 62)))
-    mix = lead + tuple(replace(note, id=f"b{i}", midi=40, strength=0.95) for i, note in enumerate(lead))
+    mix = tuple(replace(note, id=f"b{i}", midi=40, strength=0.95) for i, note in enumerate(lead))
     beat = BeatEstimate(100, 0.12, True)
     analyzed, separated = [], []
 
-    def analyze(media, *, vocals, find_beats, **_):
+    def analyze(media, *, vocals, find_beats, melody_only, **_):
+        assert melody_only
         analyzed.append((vocals, find_beats))
         notes = mix if vocals is None else lead[:1] if mode == "sparse" else lead
-        return AnalysisResult(media, 3, notes, beat if find_beats else BeatEstimate())
+        return AnalysisResult(media, 3, notes, beat if find_beats else BeatEstimate(),
+                              candidate_overlap=0.5 if vocals is None else 0.0)
 
     def separate(media, destination, **_):
         assert media.path == source

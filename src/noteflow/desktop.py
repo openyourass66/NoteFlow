@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QApplication, QFileDialog, QInputDialog, QListWidgetItem, QMainWindow, QMessageBox, QTableWidgetItem,
 )
 
-from .analysis import AnalysisResult, analyze_media
+from .analysis import HEAVY_OVERLAP, AnalysisResult, analyze_media
 from .desktop_settings import Tools, edit_tools, load_tools
 from .desktop_ui import build_interface, set_transport_paused
 from .errors import NoteFlowError
@@ -33,7 +33,6 @@ from .separation import Stems, separate
 from .synthesis import render_preview
 
 LOG = logging.getLogger("noteflow")
-HEAVY_OVERLAP = 0.3
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +42,11 @@ class GeneratedScore:
     from_vocals: bool = False
     stems: Stems | None = None
     notice: str = ""
+
+    @property
+    def overlap_fraction(self) -> float:
+        overlap = self.analysis.candidate_overlap
+        return _overlap_fraction(self.score) if overlap is None else overlap
 
 
 def _overlap_fraction(score: Score) -> float:
@@ -311,7 +315,8 @@ class MainWindow(QMainWindow):
         def generate(cancel, progress):
             def build(source, beat=None):
                 analysis = analyze_media(media, ffmpeg=tools.ffmpeg, find_beats=beat is None, workdir=workdir,
-                                         cancel=cancel, progress=progress, vocals=source, verify_pitch=True)
+                                         cancel=cancel, progress=progress, vocals=source, verify_pitch=True,
+                                         melody_only=True)
                 if beat is not None:
                     analysis = replace(analysis, beat=beat)
                 progress("正在生成简谱…")
@@ -320,7 +325,7 @@ class MainWindow(QMainWindow):
                 return GeneratedScore(analysis, score, from_vocals=source is not None)
 
             result = build(vocals)
-            overlap = _overlap_fraction(result.score)
+            overlap = result.overlap_fraction
             if mode != "auto" or overlap <= HEAVY_OVERLAP:
                 return result
             stems = existing_stems
@@ -337,7 +342,7 @@ class MainWindow(QMainWindow):
                 LOG.info("Automatic vocal analysis: %s %s", error.stage, error.code)
                 return replace(result, notice=f"自动分离制谱未完成。{error}")
             # Require a substantial vocal melody with fewer competing notes.
-            if (_overlap_fraction(vocal_result.score) < overlap
+            if (vocal_result.overlap_fraction < overlap
                     and _melody_duration(vocal_result.score) >= _melody_duration(result.score) / 2):
                 return replace(vocal_result, stems=stems)
             return replace(result, notice="分离后可用的人声旋律不足，已使用原曲。")
@@ -355,10 +360,11 @@ class MainWindow(QMainWindow):
         self._redo.clear()
         self._analysis_vocals = result.from_vocals
         self._show_media(self.analysis.duration_s)
-        self._publish_score(result.score, calibrated=self.analysis.beat.reliable, notice=result.notice)
+        self._publish_score(result.score, calibrated=self.analysis.beat.reliable, notice=result.notice,
+                            overlap=result.overlap_fraction)
         self._mark_dirty()
 
-    def _publish_score(self, score, *, calibrated=True, notice=""):
+    def _publish_score(self, score, *, calibrated=True, notice="", overlap=None):
         self.score = score
         self.score_view.set_score(score)
         self._refresh_editor()
@@ -369,7 +375,7 @@ class MainWindow(QMainWindow):
         message = f"{source}简谱，{len(score.measures)} 小节，{len(score.grid.notes)} 个音符。"
         if not calibrated:
             message += "拍点证据不足，当前使用 120 BPM，请手动校准。"
-        if _overlap_fraction(score) > HEAVY_OVERLAP:
+        if (_overlap_fraction(score) if overlap is None else overlap) > HEAVY_OVERLAP:
             message += "重叠音较多，可能含伴奏或和弦。"
         self._status(message + notice)
 
