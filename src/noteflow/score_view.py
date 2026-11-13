@@ -1,14 +1,18 @@
-"""Draw numbered notation using the active Qt palette."""
+"""Draw numbered notation on a centered sheet in the workspace."""
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPalette, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
+
+from .desktop_theme import COLORS
 from PySide6.QtWidgets import QWidget
 
 from .score import KEYS, Score, to_text
 
 
 class ScoreView(QWidget):
-    MARGIN = 32
+    MARGIN = 36
+    PAPER_INSET = 16
+    PAPER_MAX_WIDTH = 1080
     note_clicked = Signal(str)
 
     def __init__(self):
@@ -53,19 +57,25 @@ class ScoreView(QWidget):
         font.setPointSizeF(max(16, self.font().pointSizeF() * 1.45))
         return font
 
+    def _paper(self):
+        inset = max(self.PAPER_INSET, (self.width() - self.PAPER_MAX_WIDTH) / 2)
+        return QRectF(inset, self.PAPER_INSET, self.width() - 2 * inset, self.height() - 2 * self.PAPER_INSET)
+
     def _layout(self):
         metrics = QFontMetrics(self._notation_font())
         slot = max(27, metrics.horizontalAdvance("♭7") + 8)
-        row_height = max(104, metrics.height() + 64)
-        limit = self.width() - self.MARGIN
-        x, y = self.MARGIN, 96
+        row_height = max(92, metrics.height() + 54)
+        paper = self._paper()
+        margin = paper.left() + self.MARGIN
+        limit = paper.right() - self.MARGIN
+        x, y = margin, 106
         tokens, bars = [], []
         for index, measure in enumerate(self.score.measures, 1):
             width = sum(slot * (1 + {960: 1, 1920: 3}.get(token.duration_tick, 0)) for token in measure) + 14
             # Fit a dense measure in a narrow window while retaining whole-bar wrapping.
-            scale = min(1.0, max(0.5, (limit - self.MARGIN) / width))
-            if x > self.MARGIN and x + width * scale > limit:
-                x, y = self.MARGIN, y + row_height
+            scale = min(1.0, max(0.5, (limit - margin) / width))
+            if x > margin and x + width * scale > limit:
+                x, y = margin, y + row_height
             start = x
             for token in measure:
                 count = 1 + {960: 1, 1920: 3}.get(token.duration_tick, 0)
@@ -73,7 +83,7 @@ class ScoreView(QWidget):
                 x += slot * scale * count
             bars.append((index, start, x + 4 * scale, y))
             x += 14 * scale
-        return tokens, bars, y + row_height
+        return tokens, bars, y + row_height + self.PAPER_INSET
 
     def _reflow(self):
         self.setMinimumHeight(self._layout()[2] if self.score else 200)
@@ -86,43 +96,52 @@ class ScoreView(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        palette = self.palette()
-        painter.fillRect(event.rect(), palette.color(QPalette.ColorRole.Base))
-        text = palette.color(QPalette.ColorRole.Text)
+        painter.fillRect(event.rect(), QColor(COLORS["window"]))
+        paper = self._paper()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#0f1116"))
+        painter.drawRoundedRect(paper.translated(0, 3), 6, 6)
+        painter.setBrush(QColor("#faf8f2"))
+        painter.drawRoundedRect(paper, 6, 6)
+        text = QColor("#202638")
         painter.setPen(text)
         if not self.score:
             center = self.rect().center()
             x, y = center.x(), center.y() - 24
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#edf5f2"))
+            painter.setBrush(QColor("#e5e8f7"))
             painter.drawRoundedRect(QRectF(x - 27, y - 35, 54, 54), 14, 14)
-            painter.setPen(QPen(QColor("#377662"), 2.3))
+            painter.setPen(QPen(QColor("#5363a9"), 2.3))
             painter.drawLine(QPointF(x + 7, y - 24), QPointF(x + 7, y + 3))
             painter.drawLine(QPointF(x + 7, y - 24), QPointF(x + 18, y - 18))
-            painter.setBrush(QColor("#377662"))
+            painter.setBrush(QColor("#5363a9"))
             painter.drawEllipse(QRectF(x - 6, y - 1, 13, 9))
             font = QFont(self.font())
             font.setPixelSize(15)
             painter.setFont(font)
-            painter.setPen(QColor("#566773"))
+            painter.setPen(QColor("#525b71"))
             painter.drawText(QRectF(0, y + 32, self.width(), 24), Qt.AlignmentFlag.AlignCenter,
                              self._empty_message)
             return
 
         settings = self.score.settings
-        painter.setPen(QColor("#566773"))
-        painter.drawText(self.MARGIN, 38, f"1={KEYS[settings.tonic_pc]}     4/4     BPM = {settings.bpm:g}")
-        painter.setPen(text)
+        start = paper.left() + self.MARGIN
+        painter.setPen(QColor("#525b71"))
+        painter.drawText(QPointF(start, 52), f"1={KEYS[settings.tonic_pc]}     4/4     BPM {settings.bpm:g}")
+        painter.setPen(QColor("#dddde5"))
+        painter.drawLine(QPointF(start, 67), QPointF(paper.right() - self.MARGIN, 67))
         tokens, bars, _ = self._layout()
         for index, start, end, y in bars:
+            painter.setPen(QColor("#626b7c"))
             painter.drawText(QPointF(start, y - 23), str(index))
+            painter.setPen(QColor("#485064"))
             painter.drawLine(QPointF(end, y - 15), QPointF(end, y + 28))
 
+        painter.setPen(text)
         painter.setFont(self._notation_font())
         for index, (token, x, y, slot, count) in enumerate(tokens):
             if token.note_id and token.note_id == self.active_note:
-                painter.fillRect(QRectF(x - slot / 2, y - 9, slot * count, 51),
-                                 palette.color(QPalette.ColorRole.Highlight))
+                painter.fillRect(QRectF(x - slot / 2, y - 9, slot * count, 51), QColor("#dce3ff"))
             symbol = f"{token.accidental}{token.degree}"
             painter.drawText(QRectF(x - slot / 2, y, slot, 28), Qt.AlignmentFlag.AlignCenter, symbol)
             for line in range(1, count):

@@ -16,6 +16,7 @@ from .errors import NoteFlowError
 from .export import PROGRAMS
 from .media import MAX_SECONDS, MediaInfo, decode_original
 from .notes import NoteEvent
+from .options import AnalysisOptions, UncertainRegion
 from .process import check_cancelled
 from .rhythm import BeatEstimate
 from .score import Score, ScoreSettings, build_score
@@ -41,13 +42,15 @@ def save_project(project: Project, path: Path, ffmpeg: str, cancel: Event | None
         with TemporaryDirectory(prefix="save-") as folder:
             original = decode_original(project.media, Path(folder) / "original.wav", ffmpeg, cancel)
             data = {
-                "version": 1, "name": project.name, "instrument": project.instrument,
+                "version": 2, "name": project.name, "instrument": project.instrument,
                 "notes": [asdict(n) for n in project.analysis.notes] if project.analysis else None,
                 "beat": asdict(project.analysis.beat) if project.analysis else None,
                 "settings": asdict(project.score.settings) if project.score else None,
                 "edited_notes": [asdict(n) for n in project.edited_notes] if project.edited_notes is not None else None,
                 "stems": project.stems is not None,
                 "vocal_score": project.vocal_score,
+                "analysis_options": asdict(project.analysis.options) if project.analysis else None,
+                "uncertain": [asdict(r) for r in project.analysis.uncertain] if project.analysis else [],
             }
             with ZipFile(temporary, "w") as archive:
                 archive.writestr("project.json", json.dumps(data, ensure_ascii=False), compress_type=ZIP_DEFLATED)
@@ -91,7 +94,7 @@ def load_project(path: Path, directory: Path, cancel: Event | None = None) -> Pr
                     or archive.getinfo("project.json").file_size > 8_000_000):
                 raise ValueError("Project exceeds limits")
             data = json.loads(archive.read("project.json"))
-            if data["version"] != 1 or not isinstance(data["name"], str) or len(data["name"]) > 1024:
+            if data["version"] not in (1, 2) or not isinstance(data["name"], str) or len(data["name"]) > 1024:
                 raise ValueError("Unsupported project")
             expected = {"project.json", "audio/original.wav"}
             if data["stems"] is True:
@@ -119,7 +122,14 @@ def load_project(path: Path, directory: Path, cancel: Event | None = None) -> Pr
             if data["notes"] is not None:
                 beat = BeatEstimate(**data["beat"])
                 ScoreSettings(beat.bpm, beat.first_beat_s)
-                analysis = AnalysisResult(media, duration, _notes(data["notes"], duration), beat)
+                options = (AnalysisOptions(**data["analysis_options"]) if data["version"] == 2
+                           else AnalysisOptions(target="vocal" if data.get("vocal_score") else "instrument"))
+                uncertain = tuple(UncertainRegion(**r) for r in data.get("uncertain", []))
+                if any(not 0 <= r.start_s < r.end_s <= duration + 0.001
+                       or not isinstance(r.reason, str) or len(r.reason) > 256 for r in uncertain):
+                    raise ValueError("Invalid uncertainty metadata")
+                analysis = AnalysisResult(media, duration, _notes(data["notes"], duration), beat,
+                                          options=options, uncertain=uncertain)
                 if data["edited_notes"] is not None:
                     edited = _notes(data["edited_notes"], duration)
                 score = build_score(analysis.notes if edited is None else edited, ScoreSettings(**data["settings"]))

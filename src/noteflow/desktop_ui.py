@@ -1,96 +1,47 @@
 """Native desktop workspace, editor and transport controls."""
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QColor, QKeySequence, QPalette, QShortcut
+from math import exp, sin
+
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence, QLinearGradient, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QHeaderView,
-    QLabel, QMenu, QProgressBar, QPushButton, QScrollArea, QSlider, QStackedWidget,
+    QAbstractItemView, QDoubleSpinBox, QFrame, QHBoxLayout, QHeaderView,
+    QLabel, QListWidget, QMenu, QProgressBar, QPushButton, QScrollArea, QSlider, QStackedWidget,
     QTabBar, QTableWidget, QVBoxLayout, QWidget,
 )
 
+from .desktop_theme import COLORS, ICON_SIZE, ComboBox, apply_theme, icon
 from .export import PROGRAMS
-from .media import MAX_BYTES, MAX_SECONDS, MEDIA_SUFFIXES
+from .media import MEDIA_SUFFIXES
 from .score import BPM_MAX, BPM_MIN, KEYS
 from .score_view import ScoreView
 
-STYLE = """
-QMainWindow { background: #f1f4f6; }
-QWidget { color: #22323c; font-family: "Microsoft YaHei UI"; font-size: 13px; }
-QLabel#caption { color: #566773; font-size: 12px; }
-QFrame#surface { background: white; border: 1px solid #dbe2e7; border-radius: 9px; }
-QFrame#divider { background: #e2e8ec; }
-QWidget#calibration { background: #f5f8f9; }
-QPushButton {
-    background: white; border: 1px solid #d4dee4; border-radius: 6px; padding: 0 11px;
-}
-QPushButton:hover { background: #f0f5f6; border-color: #a8bbc4; }
-QPushButton:pressed { background: #e2ebed; }
-QPushButton#quiet { border-color: transparent; background: transparent; }
-QPushButton#quiet:hover { background: #e8eef1; }
-QPushButton#quiet:pressed { background: #dce8eb; }
-QPushButton#quiet:checked { background: #e3eeea; color: #1b5747; }
-QPushButton#primary {
-    background: #216451; border-color: #216451; color: white; font-weight: 600; padding: 0 16px;
-}
-QPushButton#primary:hover { background: #184e40; }
-QPushButton#primary:pressed { background: #123e33; }
-QPushButton#primary:focus { border: 2px solid #0f322a; }
-QPushButton:disabled, QPushButton#primary:disabled {
-    background: #f3f6f7; color: #82919a; border-color: #e3e9ed;
-}
-QPushButton#quiet:disabled { color: #82919a; }
-QPushButton#more { font-family: "Segoe UI"; font-size: 20px; padding: 0; }
-QPushButton#more::menu-indicator { image: none; width: 0; }
-QPushButton#export { padding-right: 22px; }
-QPushButton#export::menu-indicator { subcontrol-position: right center; right: 8px; }
-QComboBox:disabled, QDoubleSpinBox:disabled { color: #82919a; }
-QComboBox QAbstractItemView {
-    background: white; color: #22323c; selection-background-color: #dceee6; selection-color: #19483b;
-}
-QPushButton:focus, QPushButton#quiet:focus, QScrollArea:focus, QTableWidget:focus {
-    border: 1px solid #216451;
-}
-QTabBar::tab {
-    padding: 0 14px; min-height: 37px; background: transparent; color: #566773;
-    border: 1px solid transparent; border-bottom-width: 2px;
-}
-QTabBar::tab:selected { color: #1b5747; border-bottom-color: #216451; font-weight: 600; }
-QTabBar::tab:hover { background: #f0f5f6; }
-QTabBar::tab:focus { border-color: #216451; }
-QScrollArea, QTableWidget {
-    border: 1px solid transparent; background: white; alternate-background-color: #f5f8f9;
-    selection-background-color: #dceee6; selection-color: #19483b;
-}
-QHeaderView::section { background: #f1f4f6; color: #566773; border: 0; padding: 9px; }
-QTableWidget::item { padding: 6px; border-bottom: 1px solid #edf1f3; }
-QSlider::groove:horizontal { height: 4px; background: #dfe7eb; border-radius: 2px; }
-QSlider::sub-page:horizontal { background: #45806f; border-radius: 2px; }
-QSlider::handle:horizontal { width: 12px; margin: -4px 0; background: #216451; border-radius: 6px; }
-QSlider::handle:horizontal:focus { background: #216451; border: 2px solid #102e28; }
-QSlider::sub-page:horizontal:disabled, QSlider::handle:horizontal:disabled { background: #aebcc4; }
-QProgressBar { border: 0; background: #dfe7eb; border-radius: 3px; }
-QProgressBar::chunk { background: #45806f; }
-QMenu { background: white; padding: 4px; border: 1px solid #d4dee4; }
-QMenu::item { padding: 7px 24px; border-radius: 4px; }
-QMenu::item:selected { background: #e3eeea; color: #19483b; }
-QMenu::item:disabled { color: #82919a; }
-QMenu::separator { background: #e2e8ec; height: 1px; margin: 4px 8px; }
-QScrollBar:vertical { width: 9px; background: #f5f8f9; margin: 0; }
-QScrollBar::handle:vertical { background: #bfcbd2; min-height: 30px; border-radius: 4px; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
-QToolTip { background: #22323c; color: white; border: 0; padding: 6px; }
-"""
-
-
-def _button(layout, text, action=None, *, style="", height=34):
+def _button(layout, text, action=None, *, style="", height=32, glyph=None):
     button = QPushButton(text)
     button.setMinimumHeight(height)
     button.setObjectName(style)
+    if glyph:
+        button.setIcon(icon(glyph, accent_ink=style == "primary"))
+        button.setIconSize(ICON_SIZE)
     if action is not None:
         button.clicked.connect(action)
     layout.addWidget(button)
     return button
+
+
+def _icon_button(layout, glyph, label, action=None):
+    button = _button(layout, "", action, style="icon", glyph=glyph)
+    button.setFixedWidth(32)
+    button.setAccessibleName(label)
+    button.setToolTip(label)
+    return button
+
+
+def set_transport_paused(button, paused):
+    label = "继续播放" if paused else "暂停播放"
+    button.setIcon(icon("play" if paused else "pause"))
+    button.setAccessibleName(label)
+    button.setToolTip(label)
 
 
 def _field(layout, text, widget):
@@ -123,27 +74,44 @@ def _menu_action(w, menu, title, action, shortcut):
 
 
 def _workflow_toolbar(w):
-    toolbar = QHBoxLayout()
+    bar = QFrame()
+    bar.setObjectName("toolbar")
+    toolbar = QHBoxLayout(bar)
+    toolbar.setContentsMargins(12, 6, 12, 6)
     toolbar.setSpacing(6)
-    w.open_button = _button(toolbar, "导入媒体…", w.choose_source)
-    formats = " · ".join(suffix[1:].upper() for suffix in MEDIA_SUFFIXES)
-    w.open_button.setToolTip(
-        f"导入音频或视频 (Ctrl+O)\n{formats} · 最长 {MAX_SECONDS} 秒 · 最大 {MAX_BYTES // 1_000_000} MB"
-    )
-    w.open_project_button = _button(toolbar, "打开项目…", w.choose_project, style="quiet")
-    w.save_button = _button(toolbar, "保存项目", w.save_project, style="quiet")
-    toolbar.addStretch()
-    w.source_mode = QComboBox()
-    w.source_mode.addItems(("原曲 / 独奏", "分离人声"))
-    _field(toolbar, "识别来源", w.source_mode)
-    w.separate_button = _button(toolbar, "分离人声与伴奏", w.separate_tracks, style="quiet")
-    w.generate_button = _button(toolbar, "生成简谱", w.generate, style="primary")
-    w.cancel_button = _button(toolbar, "取消任务", w.cancel_job)
-    toolbar.addSpacing(4)
-    more = _button(toolbar, "⋯", style="more")
-    more.setFixedWidth(36)
-    more.setAccessibleName("更多操作")
-    more.setToolTip("更多操作")
+    w.workflow_actions = QWidget()
+    actions = QHBoxLayout(w.workflow_actions)
+    actions.setContentsMargins(0, 0, 0, 0)
+    actions.setSpacing(4)
+    w.open_button = _icon_button(actions, "import", "导入媒体 · Ctrl+O", w.choose_source)
+    w.open_project_button = _icon_button(actions, "folder", "打开项目 · Ctrl+Shift+O", w.choose_project)
+    w.save_button = _icon_button(actions, "save", "保存项目 · Ctrl+S", w.save_project)
+    actions.addStretch()
+    w.source_mode = ComboBox()
+    w.source_mode.addItem("乐器主旋律", "instrument")
+    w.source_mode.addItem("人声主旋律", "vocal")
+    _field(actions, "提取目标", w.source_mode)
+    w.analysis_input = ComboBox()
+    w.analysis_input.addItem("自动选源", "auto")
+    w.analysis_input.addItem("直接识别原曲", "original")
+    w.analysis_input.addItem("先分离伴奏／人声", "separated")
+    w.analysis_input.setAccessibleName("分析音轨")
+    w.analysis_input.setToolTip("自动：乐器使用原曲，人声先分离；分离伴奏可能损伤乐器，可对照原曲重试。")
+    actions.addWidget(w.analysis_input)
+    w.pitch_range = ComboBox()
+    w.pitch_range.addItem("默认音域", (36, 96))
+    w.pitch_range.addItem("较高声部", (60, 96))
+    w.pitch_range.addItem("较低声部", (36, 72))
+    w.pitch_range.setAccessibleName("主旋律音域")
+    w.pitch_range.setToolTip("识别到错误声部时，可限定较高或较低音域后重新生成。")
+    actions.addWidget(w.pitch_range)
+    w.separate_button = _button(actions, "分轨试听", w.separate_tracks)
+    w.generate_button = _button(actions, "生成简谱", w.generate, style="primary")
+    toolbar.addWidget(w.workflow_actions, 1)
+    w.toolbar_spacer = QWidget()
+    toolbar.addWidget(w.toolbar_spacer, 1)
+    w.cancel_button = _button(toolbar, "取消任务", w.cancel_job, style="quiet")
+    more = _icon_button(toolbar, "more", "更多操作")
     menu = QMenu(more)
     w.recent_menu = menu.addMenu("最近项目")
     w.recent_menu.setToolTipsVisible(True)
@@ -153,17 +121,102 @@ def _workflow_toolbar(w):
     menu.addAction("使用说明", w.show_help)
     _menu_action(w, menu, "退出", w.close, "Ctrl+Q")
     more.setMenu(menu)
-    return toolbar
+    return bar
+
+
+class _WelcomeWaveform(QWidget):
+    """Decorative waveform for the media import card."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(118)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0, 0, -1, -1)
+        tint = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        tint.setColorAt(0, QColor("#222943"))
+        tint.setColorAt(1, QColor("#28243a"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(tint)
+        painter.drawRoundedRect(rect, 9, 9)
+        center = rect.center().y()
+        painter.setPen(QColor("#3a4260"))
+        painter.drawLine(QPointF(16, center), QPointF(rect.right() - 16, center))
+        count = 75
+        for index in range(count):
+            ratio = index / (count - 1)
+            x = 18 + (rect.width() - 36) * ratio
+            envelope = exp(-((ratio - .30) / .17) ** 2) + .70 * exp(-((ratio - .70) / .12) ** 2)
+            amplitude = 2 + 38 * envelope * (.22 + .78 * abs(sin(index * 1.63)))
+            color = QColor(COLORS["accent"])
+            color.setAlpha(65 + int(140 * min(1, envelope)))
+            painter.setPen(QPen(QBrush(color), 2.1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(QPointF(x, center - amplitude), QPointF(x, center + amplitude))
+
+
+def _start_page(w):
+    page = QWidget()
+    page.setObjectName("startPage")
+    layout = QVBoxLayout(page)
+    layout.setContentsMargins(24, 20, 24, 20)
+    layout.addStretch(4)
+    card = QFrame()
+    card.setObjectName("startCard")
+    card.setFixedWidth(518)
+    content = QVBoxLayout(card)
+    content.setContentsMargins(24, 24, 24, 24)
+    content.setSpacing(8)
+    content.addWidget(_WelcomeWaveform())
+    content.addSpacing(8)
+    title = QLabel("从音频生成简谱")
+    title.setObjectName("startTitle")
+    content.addWidget(title)
+    hint = QLabel("将音频或视频拖入窗口")
+    hint.setObjectName("hint")
+    content.addWidget(hint)
+    content.addSpacing(7)
+    actions = QHBoxLayout()
+    actions.setSpacing(8)
+    w.start_import = _button(actions, "导入媒体", w.choose_source, style="primary", height=38, glyph="import")
+    w.start_open_project = _button(actions, "打开项目", w.choose_project, height=38, glyph="folder")
+    actions.addStretch()
+    content.addLayout(actions)
+    formats = QLabel(" · ".join(suffix[1:].upper() for suffix in MEDIA_SUFFIXES))
+    formats.setObjectName("caption")
+    content.addWidget(formats)
+
+    w.start_recent = QWidget()
+    recent = QVBoxLayout(w.start_recent)
+    recent.setContentsMargins(0, 8, 0, 0)
+    recent.setSpacing(7)
+    heading = QLabel("最近项目")
+    heading.setObjectName("recentTitle")
+    recent.addWidget(heading)
+    w.recent_list = QListWidget()
+    w.recent_list.setObjectName("recent")
+    w.recent_list.setAccessibleName("最近项目")
+    w.recent_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    w.recent_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    w.recent_list.itemActivated.connect(lambda item: w.open_source(item.data(Qt.ItemDataRole.UserRole)))
+    recent.addWidget(w.recent_list)
+    content.addWidget(w.start_recent)
+    layout.addWidget(card, 0, Qt.AlignmentFlag.AlignHCenter)
+    layout.addStretch(5)
+    return page
 
 
 def _score_workspace(w):
-    surface = QFrame()
-    surface.setObjectName("surface")
+    surface = QWidget()
+    surface.setObjectName("workspace")
     workspace = QVBoxLayout(surface)
-    workspace.setContentsMargins(1, 1, 1, 4)
+    workspace.setContentsMargins(0, 0, 0, 0)
     workspace.setSpacing(0)
-    tools = QHBoxLayout()
-    tools.setContentsMargins(10, 2, 10, 0)
+    toolbar = QWidget()
+    toolbar.setObjectName("editorTools")
+    tools = QHBoxLayout(toolbar)
+    tools.setContentsMargins(12, 5, 12, 5)
     tools.setSpacing(6)
     w.tabs = QTabBar()
     w.tabs.setExpanding(False)
@@ -172,20 +225,20 @@ def _score_workspace(w):
     w.tabs.addTab("数字简谱")
     w.tabs.addTab("音符编辑")
     tools.addWidget(w.tabs)
-    tools.addStretch()
-    w.undo_button = _button(tools, "撤销", w.undo, style="quiet", height=30)
-    w.redo_button = _button(tools, "重做", w.redo, style="quiet", height=30)
     tools.addWidget(_divider(Qt.Orientation.Vertical))
-    w.calibration_toggle = _button(tools, "节奏与调号  +", style="quiet", height=30)
+    w.undo_button = _icon_button(tools, "undo", "撤销 · Ctrl+Z", w.undo)
+    w.redo_button = _icon_button(tools, "redo", "重做 · Ctrl+Y", w.redo)
+    tools.addStretch()
+    w.calibration_toggle = _button(tools, "节奏与调号", style="quiet")
     w.calibration_toggle.setAccessibleName("节奏与调号")
     w.calibration_toggle.setCheckable(True)
-    w.export_button = _button(tools, "导出", style="export", height=30)
+    w.export_button = _button(tools, "导出", style="export")
     menu = QMenu(w.export_button)
     w.txt_action = menu.addAction("导出 TXT…", lambda: w.export(False))
     w.midi_action = menu.addAction("导出 MIDI…", lambda: w.export(True))
     w.audio_export_action = menu.addAction("导出音频…", w.export_audio)
     w.export_button.setMenu(menu)
-    workspace.addLayout(tools)
+    workspace.addWidget(toolbar)
     workspace.addWidget(_divider(Qt.Orientation.Horizontal))
 
     calibration = QWidget()
@@ -200,7 +253,7 @@ def _score_workspace(w):
     w.offset = QDoubleSpinBox()
     w.offset.setDecimals(3)
     w.offset.setSingleStep(0.01)
-    w.key = QComboBox()
+    w.key = ComboBox()
     w.key.addItems(KEYS)
     _field(controls, "BPM", w.bpm)
     _field(controls, "首拍 / 秒", w.offset)
@@ -211,13 +264,12 @@ def _score_workspace(w):
     w.bpm.valueChanged.connect(w._update_offset_limit)
     w._update_offset_limit()
     w.calibration_toggle.toggled.connect(calibration.setVisible)
-    w.calibration_toggle.toggled.connect(
-        lambda opened: w.calibration_toggle.setText("节奏与调号  −" if opened else "节奏与调号  +")
-    )
     workspace.addWidget(calibration)
 
     w.score_view = ScoreView()
     w.score_scroll = QScrollArea()
+    w.score_scroll.setObjectName("scoreScroll")
+    w.score_scroll.setAccessibleName("简谱视图")
     w.score_scroll.setWidgetResizable(True)
     w.score_scroll.setWidget(w.score_view)
     w.score_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -226,6 +278,7 @@ def _score_workspace(w):
     pages.addWidget(_note_editor(w))
     w.tabs.currentChanged.connect(pages.setCurrentIndex)
     workspace.addWidget(pages, 1)
+    workspace.addWidget(_player(w))
     return surface
 
 
@@ -263,72 +316,91 @@ def _note_editor(w):
 
 def _player(w):
     player = QFrame()
-    player.setObjectName("surface")
+    player.setObjectName("toolbar")
     layout = QVBoxLayout(player)
-    layout.setContentsMargins(10, 6, 10, 6)
-    layout.setSpacing(5)
-    tracks = QHBoxLayout()
-    tracks.setSpacing(6)
-    w.original_button = _button(tracks, "播放原曲", w.play_original, style="quiet")
-    w.vocals_button = _button(tracks, "播放人声", lambda: w.play_stem(vocals=True), style="quiet")
-    w.accompaniment_button = _button(tracks, "播放伴奏", lambda: w.play_stem(vocals=False), style="quiet")
-    tracks.addStretch()
-    w.instrument = QComboBox()
-    w.instrument.addItems(PROGRAMS)
-    _field(tracks, "音色", w.instrument)
-    w.melody_button = _button(tracks, "试听旋律", lambda: w.play(original_timing=True), style="quiet")
-    w.play_button = _button(tracks, "播放简谱", w.play)
-    w.instrument.currentIndexChanged.connect(w._change_instrument)
-    layout.addLayout(tracks)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
     layout.addWidget(_divider(Qt.Orientation.Horizontal))
     transport = QHBoxLayout()
-    transport.setSpacing(6)
-    w.pause_button = _button(transport, "暂停", w.toggle_pause, style="quiet", height=32)
-    w.stop_button = _button(transport, "停止", w.stop_playback, style="quiet", height=32)
+    transport.setContentsMargins(12, 7, 12, 7)
+    transport.setSpacing(7)
+    w.pause_button = _icon_button(transport, "pause", "暂停播放", w.toggle_pause)
+    w.stop_button = _icon_button(transport, "stop", "停止播放", w.stop_playback)
+
+    track_group = QFrame()
+    track_group.setObjectName("tracks")
+    tracks = QHBoxLayout(track_group)
+    tracks.setContentsMargins(3, 3, 3, 3)
+    tracks.setSpacing(2)
+    w.original_button = _button(tracks, "原曲", w.play_original, style="track", height=26)
+    w.vocals_button = _button(tracks, "人声", lambda: w.play_stem(vocals=True), style="track", height=26)
+    w.accompaniment_button = _button(tracks, "伴奏", lambda: w.play_stem(vocals=False), style="track", height=26)
+    tracks.addWidget(_divider(Qt.Orientation.Vertical))
+    w.play_button = _button(tracks, "演奏", w.play, style="track", height=26)
+    w.track_buttons = (w.original_button, w.vocals_button, w.accompaniment_button, w.play_button)
+    for button in w.track_buttons:
+        button.setCheckable(True)
+        button.setAccessibleName(f"播放{button.text()}")
+        button.setToolTip(button.accessibleName())
+    w.play_button.setToolTip("用当前音色演奏主旋律，保留原始节奏和停顿")
+    transport.addWidget(track_group)
+
     w.timeline = QSlider(Qt.Orientation.Horizontal)
     w.timeline.setMinimumHeight(24)
     w.timeline.setAccessibleName("播放进度")
     w.timeline.sliderReleased.connect(w.seek)
     transport.addWidget(w.timeline, 1)
     w.time_label = QLabel("00:00 / 00:00")
-    w.time_label.setObjectName("caption")
+    w.time_label.setObjectName("time")
     transport.addWidget(w.time_label)
-    transport.addSpacing(8)
-    w.rate = QComboBox()
+    transport.addWidget(_divider(Qt.Orientation.Vertical))
+    w.instrument = ComboBox()
+    w.instrument.addItems(PROGRAMS)
+    _field(transport, "音色", w.instrument)
+    w.instrument.currentIndexChanged.connect(w._change_instrument)
+    w.rate = ComboBox()
     w.rate.addItems(("0.5×", "0.75×", "1.0×", "1.25×", "1.5×"))
     w.rate.setCurrentIndex(2)
     w.rate.currentIndexChanged.connect(w.change_rate)
-    _field(transport, "速度", w.rate)
-    transport.addSpacing(8)
+    w.rate.setMinimumHeight(32)
+    w.rate.setAccessibleName("播放速度")
+    w.rate.setToolTip("播放速度")
+    transport.addWidget(w.rate)
+    transport.addWidget(_divider(Qt.Orientation.Vertical))
     w.volume = QSlider(Qt.Orientation.Horizontal)
     w.volume.setRange(0, 100)
     w.volume.setValue(65)
-    w.volume.setFixedWidth(80)
+    w.volume.setFixedWidth(60)
+    w.volume.setAccessibleName("播放音量")
+    w.volume.setToolTip("播放音量")
     w.volume.valueChanged.connect(lambda value: w._audio.setVolume(value / 100))
-    _field(transport, "音量", w.volume)
+    volume_icon = QLabel()
+    volume_icon.setPixmap(icon("volume").pixmap(ICON_SIZE, player.devicePixelRatioF()))
+    volume_icon.setBuddy(w.volume)
+    transport.addWidget(volume_icon)
+    transport.addWidget(w.volume)
     layout.addLayout(transport)
     return player
 
 
 def build_interface(w):
-    w.setStyleSheet(STYLE)
-    palette = w.palette()
-    for role, color in ((QPalette.ColorRole.Base, "#ffffff"), (QPalette.ColorRole.Text, "#22323c"),
-                        (QPalette.ColorRole.Window, "#f1f4f6"), (QPalette.ColorRole.WindowText, "#22323c"),
-                        (QPalette.ColorRole.Button, "#ffffff"),
-                        (QPalette.ColorRole.Highlight, "#dceee6"), (QPalette.ColorRole.HighlightedText, "#19483b")):
-        palette.setColor(role, QColor(color))
-    w.setPalette(palette)
+    apply_theme(w)
     central = QWidget()
     w.setCentralWidget(central)
     layout = QVBoxLayout(central)
-    layout.setContentsMargins(16, 12, 16, 8)
-    layout.setSpacing(10)
-    layout.addLayout(_workflow_toolbar(w))
-    layout.addWidget(_score_workspace(w), 1)
-    layout.addWidget(_player(w))
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+    layout.addWidget(_workflow_toolbar(w))
+    layout.addWidget(_divider(Qt.Orientation.Horizontal))
+    w.pages = QStackedWidget()
+    w.start_page = _start_page(w)
+    w.editor_page = _score_workspace(w)
+    w.pages.addWidget(w.start_page)
+    w.pages.addWidget(w.editor_page)
+    layout.addWidget(w.pages, 1)
 
     feedback = QHBoxLayout()
+    feedback.setContentsMargins(12, 3, 12, 4)
     w.status = QLabel()
     w.status.setTextFormat(Qt.TextFormat.PlainText)
     w.status.setWordWrap(True)
@@ -353,5 +425,10 @@ def build_interface(w):
         QShortcut(QKeySequence(shortcut), w, button.click)
         if not button.toolTip():
             button.setToolTip(shortcut)
+    def switch_editor_tab():
+        if w.editor_page.isVisible():
+            w.tabs.setCurrentIndex(1 - w.tabs.currentIndex())
+
     for shortcut in ("Ctrl+Tab", "Ctrl+Shift+Tab"):
-        QShortcut(QKeySequence(shortcut), w, lambda: w.tabs.setCurrentIndex(1 - w.tabs.currentIndex()))
+        QShortcut(QKeySequence(shortcut), w, switch_editor_tab)
+    w.start_import.setFocus()

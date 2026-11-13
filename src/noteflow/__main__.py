@@ -7,8 +7,11 @@ from contextlib import redirect_stdout
 from dataclasses import asdict
 from io import StringIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from .analysis import analyze
+from .media import probe
+from .options import AnalysisOptions
+from .pipeline import run_pipeline
 from .errors import NoteFlowError
 
 
@@ -17,13 +20,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("source", type=Path, help="PCM WAV、MP3 或含 AAC 音轨的 MP4 / M4A")
     parser.add_argument("--ffmpeg", default="ffmpeg", help="FFmpeg 路径，默认从 PATH 查找")
     parser.add_argument("--ffprobe", default="ffprobe", help="ffprobe 路径，默认从 PATH 查找")
-    parser.add_argument("--demucs-python", help="已安装 Demucs 的 Python 路径。提供时先分离人声，再识别音符")
+    parser.add_argument("--demucs-python", default="", help="已安装 Demucs 的 Python 路径")
+    parser.add_argument("--pitch-python", default="", help="可选：已安装 torchcrepe 的 Python 路径")
+    parser.add_argument("--target", choices=("instrument", "vocal"), default="instrument", help="提取目标")
+    parser.add_argument("--source", dest="input_mode", choices=("auto", "original", "separated"), default="auto")
+    parser.add_argument("--pitch-min", type=int, default=36)
+    parser.add_argument("--pitch-max", type=int, default=96)
     args = parser.parse_args(argv)
 
     try:
-        with redirect_stdout(StringIO()):
-            result = analyze(args.source, ffmpeg=args.ffmpeg, ffprobe=args.ffprobe,
-                             demucs_python=args.demucs_python)
+        options = AnalysisOptions(args.target, args.pitch_min, args.pitch_max, args.input_mode)
+        with redirect_stdout(StringIO()), TemporaryDirectory(prefix="noteflow-cli-") as folder:
+            media = probe(args.source, args.ffprobe)
+            result = run_pipeline(media, options, ffmpeg=args.ffmpeg, demucs_python=args.demucs_python,
+                                  pitch_python=args.pitch_python, destination=Path(folder) / "stems").analysis
+    except ValueError as exc:
+        print(json.dumps({"error": {"code": "INVALID_OPTIONS", "message": str(exc)}}, ensure_ascii=False), file=sys.stderr)
+        return 2
     except NoteFlowError as exc:
         error = {"code": exc.code, "stage": exc.stage, "message": str(exc)}
         print(json.dumps({"error": error}, ensure_ascii=False), file=sys.stderr)
@@ -35,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
         "media": {"name": args.source.name, "stream_index": result.media.stream_index,
                   "codec": result.media.codec, "duration_s": result.duration_s},
         "notes": [asdict(note) for note in result.notes],
+        "options": asdict(result.options),
+        "uncertain": [asdict(region) for region in result.uncertain],
     }, ensure_ascii=False, indent=2))
     return 0
 

@@ -5,7 +5,7 @@ import math
 import os
 import shutil
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
@@ -13,26 +13,47 @@ from threading import Event
 from time import perf_counter
 from uuid import uuid4
 
-from PySide6.QtCore import QObject, QSettings, QStandardPaths, QThread, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QSize, QStandardPaths, QThread, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QInputDialog, QMainWindow, QMessageBox, QTableWidgetItem,
+    QApplication, QFileDialog, QInputDialog, QListWidgetItem, QMainWindow, QMessageBox, QTableWidgetItem,
 )
 
-from .analysis import analyze_media
+from .analysis import HEAVY_OVERLAP, AnalysisResult
+from .options import AnalysisOptions
+from .pipeline import run_pipeline
 from .desktop_settings import Tools, edit_tools, load_tools
-from .desktop_ui import build_interface
+from .desktop_ui import build_interface, set_transport_paused
 from .errors import NoteFlowError
 from .export import PROGRAMS, export_score
 from .media import MEDIA_SUFFIXES, decode_original, probe
 from .process import Cancelled, check_cancelled
 from .project import Project, load_project, save_project
 from .notes import NoteEvent
-from .score import ScoreSettings, build_score, rekey
-from .separation import separate
+from .score import Score, ScoreSettings, build_score, rekey
+from .separation import Stems, separate
 from .synthesis import render_preview
 
 LOG = logging.getLogger("noteflow")
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedScore:
+    analysis: AnalysisResult
+    score: Score
+    from_vocals: bool = False
+    stems: Stems | None = None
+    notice: str = ""
+
+    @property
+    def overlap_fraction(self) -> float:
+        overlap = self.analysis.candidate_overlap
+        return _overlap_fraction(self.score) if overlap is None else overlap
+
+
+def _overlap_fraction(score: Score) -> float:
+    dropped = score.grid.overlap_drops
+    return dropped / max(1, dropped + len(score.melody))
 
 
 class Job(QObject):
@@ -89,6 +110,7 @@ class MainWindow(QMainWindow):
         self._pending_source = None
         self._closing = False
         self._preview_path = self._player = self._playing = None
+        self._playhead_ms = 0
         self._audio = QAudioOutput(self)
         self._audio.setVolume(0.65)
         self.setWindowTitle("NoteFlow")
@@ -113,8 +135,15 @@ class MainWindow(QMainWindow):
 
     def _sync_controls(self):
         busy, ready = self._thread is not None, self.score is not None
-        media_ready = not busy and self.media is not None
+        has_media = self.media is not None
+        media_ready = not busy and has_media
         export_ready = not busy and (ready or self.stems is not None)
+        self.pages.setCurrentWidget(self.editor_page if has_media else self.start_page)
+        self.workflow_actions.setVisible(has_media)
+        self.toolbar_spacer.setVisible(not has_media)
+        self.start_import.setEnabled(not self._closing)
+        self.start_open_project.setEnabled(not self._closing)
+        self.recent_list.setEnabled(not self._closing)
         self.open_button.setEnabled(not self._closing)
         self.settings_action.setEnabled(not busy)
         self.generate_button.setEnabled(media_ready)
@@ -122,7 +151,8 @@ class MainWindow(QMainWindow):
         self.save_button.setEnabled(media_ready)
         self.save_as_action.setEnabled(media_ready)
         self.source_mode.setEnabled(media_ready)
-        self.source_mode.model().item(1).setEnabled(self.stems is not None)
+        self.analysis_input.setEnabled(media_ready)
+        self.pitch_range.setEnabled(media_ready)
         self.recent_menu.menuAction().setEnabled(not self._closing)
         self.note_table.setEnabled(ready and not busy)
         for control in (self.add_note_button, self.delete_note_button, self.lower_button,
@@ -139,13 +169,14 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(busy and not self._cancel.is_set())
         self.cancel_button.setVisible(busy)
         for control in (self.bpm, self.offset, self.key, self.calibration_toggle, self.apply_button,
-                        self.instrument, self.melody_button, self.play_button, self.txt_action, self.midi_action):
+                        self.instrument, self.play_button, self.txt_action, self.midi_action):
             control.setEnabled(ready and not busy)
         self.stop_button.setEnabled(self._player is not None)
         self.pause_button.setEnabled(self._player is not None)
         self.timeline.setEnabled(self._player is not None)
+        for button in self.track_buttons:
+            button.setChecked(button.text() == self._playing)
         if ready and not self.score.melody:
-            self.melody_button.setEnabled(False)
             self.play_button.setEnabled(False)
         self.progress.setVisible(busy)
 
@@ -251,6 +282,7 @@ class MainWindow(QMainWindow):
     def _imported(self, media):
         self._clear_session()
         self.media = media
+        self._playhead_ms = 0
         self.source_name = media.path.name
         self._update_title()
         self._show_media(media.duration_s)
@@ -267,50 +299,61 @@ class MainWindow(QMainWindow):
         if self.media is None or self._thread is not None:
             return
         self._stop_player()
-        media, ffmpeg, workdir = self.media, self.tools.ffmpeg, self.workdir
-        vocals = self.stems.vocals if self.stems and self.source_mode.currentIndex() == 1 else None
-        self._generating_vocals = vocals is not None
         if self._edited_notes is not None and QMessageBox.question(
             self, "重新识别", "重新识别将替换手动修正的音符，继续？"
         ) != QMessageBox.StandardButton.Yes:
             return
+        media, tools, workdir, existing_stems = self.media, self.tools, self.workdir, self.stems
+        minimum, maximum = self.pitch_range.currentData()
+        options = AnalysisOptions(self.source_mode.currentData(), minimum, maximum, self.analysis_input.currentData())
+        destination = None
+        if existing_stems is None and (options.source == "separated" or
+                                      (options.source == "auto" and options.target == "vocal")):
+            destination = self._prepare_stems()
         self._revision += 1
         revision = self._revision
 
         def generate(cancel, progress):
-            analysis = analyze_media(media, ffmpeg=ffmpeg, find_beats=True, workdir=workdir,
-                                     cancel=cancel, progress=progress, vocals=vocals, verify_pitch=True)
+            result = run_pipeline(media, options, ffmpeg=tools.ffmpeg, demucs_python=tools.demucs_python,
+                                  pitch_python=tools.pitch_python, stems=existing_stems, destination=destination,
+                                  workdir=workdir, cancel=cancel, progress=progress)
+            analysis = result.analysis
             progress("正在生成简谱…")
-            beat = analysis.beat
-            score = build_score(analysis.notes, ScoreSettings(beat.bpm, beat.first_beat_s), revision)
-            return analysis, score
+            score = build_score(analysis.notes, ScoreSettings(analysis.beat.bpm, analysis.beat.first_beat_s), revision)
+            notice = f"有 {len(analysis.uncertain)} 处音高证据偏弱，可在音符编辑中对照试听。" if analysis.uncertain else ""
+            return GeneratedScore(analysis, score, options.target == "vocal", result.stems, notice)
 
         self._start("正在生成简谱…", generate, self._generated)
 
-    def _generated(self, result):
-        self.analysis, score = result
+    def _generated(self, result: GeneratedScore):
+        self.analysis = result.analysis
+        if result.stems is not None:
+            self.stems = result.stems
+        elif self.stems is None:
+            self._clear_stems()
         self._edited_notes = None
         self._undo.clear()
         self._redo.clear()
-        self._analysis_vocals = self._generating_vocals
+        self._analysis_vocals = result.from_vocals
         self._show_media(self.analysis.duration_s)
-        self._publish_score(score, calibrated=self.analysis.beat.reliable)
+        self._publish_score(result.score, calibrated=self.analysis.beat.reliable, notice=result.notice,
+                            overlap=result.overlap_fraction)
         self._mark_dirty()
 
-    def _publish_score(self, score, *, calibrated=True):
+    def _publish_score(self, score, *, calibrated=True, notice="", overlap=None):
         self.score = score
         self.score_view.set_score(score)
         self._refresh_editor()
         self.bpm.setValue(score.settings.bpm)
         self.offset.setValue(score.settings.first_beat_s)
         self.key.setCurrentIndex(score.settings.tonic_pc)
-        source = "人声" if self._analysis_vocals else "原曲"
+        source = "人声主旋律" if self._analysis_vocals else "乐器主旋律"
         message = f"{source}简谱，{len(score.measures)} 小节，{len(score.grid.notes)} 个音符。"
         if not calibrated:
             message += "拍点证据不足，当前使用 120 BPM，请手动校准。"
-        if self.analysis.notes and score.grid.overlap_drops / len(self.analysis.notes) > 0.3:
+        if (_overlap_fraction(score) if overlap is None else overlap) > HEAVY_OVERLAP:
             message += "重叠音较多，可能含伴奏或和弦。"
-        self._status(message)
+        self._status(message + notice)
 
     def apply_calibration(self):
         if self.score is None or self._thread is not None:
@@ -345,24 +388,28 @@ class MainWindow(QMainWindow):
         if not self.tools.demucs_python:
             self._status("请先在工具设置中选择已安装 Demucs 的 Python。")
             return
-        try:
-            self._stem_workspace = TemporaryDirectory(prefix="tracks-", dir=self.workdir, ignore_cleanup_errors=True)
-        except OSError:
+        destination = self._prepare_stems()
+        if destination is None:
             self._status("无法创建分轨工作目录，请检查缓存目录和磁盘空间。")
             return
         self._stop_player()
-        destination = Path(self._stem_workspace.name) / "stems"
         media, tools = self.media, self.tools
         self._start("正在分离人声与伴奏，首次运行会下载模型…",
                     lambda cancel, _: separate(media, destination, python=tools.demucs_python,
                                                ffmpeg=tools.ffmpeg, cancel=cancel),
                     self._tracks_ready)
 
+    def _prepare_stems(self) -> Path | None:
+        try:
+            self._stem_workspace = TemporaryDirectory(prefix="tracks-", dir=self.workdir, ignore_cleanup_errors=True)
+        except OSError:
+            return None
+        return Path(self._stem_workspace.name) / "stems"
+
     def _tracks_ready(self, stems):
         self.stems = stems
-        self.source_mode.setCurrentIndex(1)
         self._mark_dirty()
-        self._status("人声与伴奏已分离，可以分别播放。生成简谱将识别人声。")
+        self._status("人声与伴奏已分离，可以分别试听。提取目标保持不变。")
 
     def _clear_stems(self):
         self.stems = None
@@ -378,7 +425,7 @@ class MainWindow(QMainWindow):
         self._play_rendered(path, label)
         self._sync_controls()
 
-    def play(self, *, original_timing=False):
+    def play(self, *, original_timing=True):
         if self.score is None or self._thread is not None:
             return
         self._stop_player()
@@ -390,7 +437,7 @@ class MainWindow(QMainWindow):
         synth, soundfont = self.tools.fluidsynth, Path(self.tools.soundfont).resolve()
         target = self.workdir / f"preview-{uuid4().hex}.wav"
         self._preview_path = target
-        label = "旋律" if original_timing else "简谱"
+        label = "演奏"
         self._start(f"正在渲染{label}…", lambda cancel, _: render_preview(
             score, program, soundfont, target, synth, cancel, original_timing=original_timing),
             lambda path: self._play_rendered(path, label))
@@ -402,9 +449,17 @@ class MainWindow(QMainWindow):
         player.setAudioOutput(self._audio)
         player.setPlaybackRate((0.5, 0.75, 1, 1.25, 1.5)[self.rate.currentIndex()])
         player.durationChanged.connect(lambda duration: self.timeline.setRange(0, duration) if self._player is player else None)
+        resume_at = self._playhead_ms
+        resumed = False
+        def resume(state):
+            nonlocal resumed
+            if not resumed and self._player is player and state == QMediaPlayer.MediaStatus.LoadedMedia:
+                resumed = True
+                player.setPosition(min(resume_at, max(0, player.duration() - 1)))
+        player.mediaStatusChanged.connect(resume)
         player.positionChanged.connect(lambda position: self._position_changed(position) if self._player is player else None)
-        player.playbackStateChanged.connect(lambda state: self.pause_button.setText(
-            "继续" if state == QMediaPlayer.PlaybackState.PausedState else "暂停") if self._player is player else None)
+        player.playbackStateChanged.connect(lambda state: set_transport_paused(
+            self.pause_button, state == QMediaPlayer.PlaybackState.PausedState) if self._player is player else None)
         player.errorOccurred.connect(lambda _code, _detail: self._playback_done(player, failed=True))
         player.mediaStatusChanged.connect(lambda state: self._playback_done(player) if state == QMediaPlayer.MediaStatus.EndOfMedia else None)
         self._status(f"正在播放{label}…")
@@ -416,26 +471,28 @@ class MainWindow(QMainWindow):
         if self._player is not player:
             return
         self._stop_player()
+        self._playhead_ms = 0
         self._status("播放失败，请检查系统音频输出后重试。" if failed else "播放结束。")
         self._sync_controls()
 
     def stop_playback(self):
         self._stop_player()
+        self._playhead_ms = 0
         self._status("已停止播放。")
         self._sync_controls()
 
     def _change_instrument(self):
         if self.media is not None:
             self._mark_dirty()
-        if self._playing in ("旋律", "简谱"):
-            self.play(original_timing=self._playing == "旋律")
+        if self._playing == "演奏":
+            self.play()
 
     def _stop_player(self):
         player, self._player = self._player, None
         self._playing = None
         self.timeline.setValue(0)
         self.time_label.setText("00:00 / 00:00")
-        self.pause_button.setText("暂停")
+        set_transport_paused(self.pause_button, False)
         self.score_view.set_active_note(None)
         if player is not None:
             player.stop()
@@ -506,6 +563,7 @@ class MainWindow(QMainWindow):
 
     def _clear_session(self):
         self._stop_player()
+        self._playhead_ms = 0
         self._clear_stems()
         if self._project_workspace:
             self._project_workspace.cleanup()
@@ -516,6 +574,8 @@ class MainWindow(QMainWindow):
         self._redo.clear()
         self._dirty = self._analysis_vocals = False
         self.source_mode.setCurrentIndex(0)
+        self.analysis_input.setCurrentIndex(0)
+        self.pitch_range.setCurrentIndex(0)
         self.source_label.hide()
         self.calibration_toggle.setChecked(False)
         self.score_view.set_media_available(False)
@@ -527,10 +587,19 @@ class MainWindow(QMainWindow):
         menu = self.recent_menu
         menu.clear()
         metrics = menu.fontMetrics()
+        self.recent_list.clear()
         for recent in map(Path, paths[:8]):
             name = metrics.elidedText(recent.stem, Qt.TextElideMode.ElideMiddle, 360).replace("&", "&&")
             action = menu.addAction(name, lambda _checked=False, path=recent: self.open_source(path))
             action.setToolTip(str(recent))
+            if self.recent_list.count() < 3:
+                item = QListWidgetItem(recent.stem)
+                item.setData(Qt.ItemDataRole.UserRole, str(recent))
+                item.setToolTip(str(recent))
+                item.setSizeHint(QSize(0, 30))
+                self.recent_list.addItem(item)
+        self.recent_list.setFixedHeight(self.recent_list.count() * 30 + 8)
+        self.start_recent.setVisible(bool(paths))
         menu.menuAction().setVisible(bool(paths))
 
     def _remember_project(self, path):
@@ -561,7 +630,16 @@ class MainWindow(QMainWindow):
             self._edited_notes = project.edited_notes
             self._analysis_vocals = project.vocal_score
             self.instrument.setCurrentText(project.instrument)
-            self.source_mode.setCurrentIndex(1 if project.vocal_score else 0)
+            options = project.analysis.options if project.analysis else AnalysisOptions()
+            self.source_mode.setCurrentIndex(self.source_mode.findData(options.target))
+            self.analysis_input.setCurrentIndex(self.analysis_input.findData(options.source))
+            pitch_range = (options.pitch_min, options.pitch_max)
+            index = next((i for i in range(self.pitch_range.count())
+                          if tuple(self.pitch_range.itemData(i)) == pitch_range), -1)
+            if index < 0:
+                self.pitch_range.addItem(f"MIDI {options.pitch_min}–{options.pitch_max}", pitch_range)
+                index = self.pitch_range.count() - 1
+            self.pitch_range.setCurrentIndex(index)
             if project.score:
                 self._publish_score(project.score)
             self._dirty = False
@@ -609,12 +687,16 @@ class MainWindow(QMainWindow):
         self.note_table.setRowCount(len(notes))
         names = ("C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B")
         for row, note in enumerate(notes):
+            uncertain = self.analysis is not None and any(
+                r.start_s < note.end_s and r.end_s > note.start_s for r in self.analysis.uncertain)
             values = (f"{note.start_s:.3f}", f"{note.end_s:.3f}", str(note.midi),
-                      f"{names[note.midi % 12]}{note.midi // 12 - 1}", str(note.velocity))
+                      f"{names[note.midi % 12]}{note.midi // 12 - 1}" + (" · 待复核" if uncertain else ""), str(note.velocity))
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 item.setData(Qt.ItemDataRole.UserRole, note.id)
+                if uncertain:
+                    item.setToolTip("音高证据偏弱，请对照原声确认；这不是准确率。")
                 if column == 3:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.note_table.setItem(row, column, item)
@@ -736,13 +818,10 @@ class MainWindow(QMainWindow):
             self._sync_controls()
 
     def _note_times(self):
-        if self._playing == "简谱":
-            seconds_per_tick = self.score.settings.tempo_us / 480_000_000
-            return {n.id: (n.start_tick * seconds_per_tick, (n.start_tick + n.duration_tick) * seconds_per_tick)
-                    for n in self.score.grid.notes}
         return {n.id: (n.start_s, n.end_s) for n in self.score.melody}
 
     def _position_changed(self, position):
+        self._playhead_ms = position
         if not self.timeline.isSliderDown():
             self.timeline.setValue(position)
         duration = self._player.duration() if self._player else 0
@@ -773,7 +852,7 @@ class MainWindow(QMainWindow):
         if self.stems:
             choices.extend(("人声", "伴奏"))
         if self.score and self.score.melody:
-            choices.extend(("旋律", "简谱"))
+            choices.append("演奏")
         if not choices:
             return
         kind, accepted = QInputDialog.getItem(self, "导出音频", "选择音轨", choices, editable=False)
@@ -800,7 +879,7 @@ class MainWindow(QMainWindow):
                     shutil.copyfile(stems.vocals if kind == "人声" else stems.accompaniment, target)
                 else:
                     render_preview(score, program, Path(tools.soundfont), target, tools.fluidsynth,
-                                   cancel, original_timing=kind == "旋律")
+                                   cancel, original_timing=True)
                 check_cancelled(cancel)
                 os.replace(target, path)
 
@@ -808,10 +887,10 @@ class MainWindow(QMainWindow):
 
     def show_help(self):
         QMessageBox.information(self, "使用说明",
-            "1. 导入音频或视频。歌曲混音可先分离人声与伴奏。\n"
-            "2. 选择识别来源，生成简谱，再校准速度、首拍和主音。\n"
+            "1. 导入音频或视频，选择乐器或人声主旋律，再生成简谱。\n"
+            "2. 自动选源：乐器使用原曲，人声先分离。也可直接识别清唱或独奏。\n"
             "3. 在音符编辑页修正音高、起止时间和力度，Ctrl+Z 可撤销。\n"
-            "4. 播放时可暂停、拖动进度、调整速度。点击谱面音符可定位。\n"
+            "4. 演奏保留原始节奏，排谱校准不改变声音；点击音符可定位。\n"
             "5. Ctrl+S 保存项目。项目包含原曲、分轨和音符，可离线恢复。\n\n"
             "当前支持固定 4/4 拍、恒定速度和最长 120 秒片段。")
 
@@ -839,6 +918,8 @@ class MainWindow(QMainWindow):
 
 def main(source: Path | None = None) -> int:
     app = QApplication(["NoteFlow"])
+    if app.platformName() == "windows":
+        app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
     app.setStyle("Fusion")
     app.setApplicationName("NoteFlow")
     app.setOrganizationName("NoteFlow")

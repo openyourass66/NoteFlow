@@ -53,7 +53,7 @@ def test_melody_preview_keeps_original_note_times_with_a_pickup(tmp_path):
                         ScoreSettings(bpm=100, first_beat_s=0.35))
     assert score.grid.shift_ticks == BAR
     path = tmp_path / "preview.mid"
-    write_midi(score, 0, path, original_timing=True)
+    write_midi(score, 0, path)
     elapsed, times, pitches = 0, [], []
     for message in mido.MidiFile(path):
         elapsed += message.time
@@ -62,6 +62,22 @@ def test_melody_preview_keeps_original_note_times_with_a_pickup(tmp_path):
             pitches.append(message.note)
     assert times == pytest.approx([0.13, 0.42, 0.49, 0.68], abs=0.001)
     assert pitches == [60, 60, 64, 64]
+
+
+def test_notation_calibration_does_not_move_default_playback(tmp_path):
+    notes = (note(1, .13, .47, 60), note(2, .51, .81, 60))
+    timelines = []
+    for index, settings in enumerate((ScoreSettings(), ScoreSettings(175, .2, 7))):
+        path = tmp_path / f"variant-{index}.mid"
+        write_midi(build_score(notes, settings), 0, path)
+        time = 0
+        timeline = []
+        for event in mido.MidiFile(path):
+            time += event.time
+            if event.type in ("note_on", "note_off"):
+                timeline.append(time)
+        timelines.append(timeline)
+    assert timelines[0] == pytest.approx(timelines[1], abs=.001)
 
 
 def test_empty_score_and_unreliable_beat_use_safe_defaults():
@@ -93,7 +109,7 @@ def test_midi_export_matches_score_and_can_replace_only_with_permission(tmp_path
             events.append((tick, message.type, message.note))
     assert events == [(0, "note_on", 60), (480, "note_off", 60), (480, "note_on", 60),
                       (720, "note_off", 60), (1680, "note_on", 67), (2160, "note_off", 67)]
-    assert tick == BAR * len(score.measures)
+    assert tick == 2160  # Performance export does not append quantized bar padding.
     export_score(score, 40, midi_path, midi=True, overwrite=True)
     assert mido.MidiFile(midi_path).tracks[0][3].program == 40
     assert set(tmp_path.iterdir()) == {midi_path, txt_path}

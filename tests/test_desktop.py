@@ -12,9 +12,14 @@ from PySide6.QtMultimedia import QMediaDevices
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QFileDialog
 
-from noteflow import desktop
+from noteflow import desktop, pipeline
+from noteflow.analysis import AnalysisResult
 from noteflow.desktop_settings import _default_tools
+from noteflow.errors import NoteFlowError
+from noteflow.media import MediaInfo
+from noteflow.notes import NoteEvent
 from noteflow.process import check_cancelled
+from noteflow.rhythm import BeatEstimate
 from noteflow.score import to_text
 from noteflow.separation import Stems
 from poc.fixtures import melody, write_wave
@@ -42,7 +47,7 @@ def wait_for(app, condition, timeout=100):
 def window(app, tmp_path, monkeypatch):
     import shutil
 
-    tools = _default_tools()
+    tools = replace(_default_tools(), pitch_python="")
     if not shutil.which(tools.ffmpeg) or not shutil.which(tools.ffprobe):
         pytest.skip("Desktop tests require FFmpeg and ffprobe")
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
@@ -66,12 +71,19 @@ def test_toolbar_preserves_file_shortcuts_and_recent_projects(app, tmp_path, mon
     window.activateWindow()
     app.processEvents()
     try:
+        assert window.start_page.isVisible()
+        assert not window.editor_page.isVisible()
         QTest.keyClick(window, Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
         assert opened == [recent]
         action, = window.recent_menu.actions()
         assert action.text() == "曲目 && 项目"
         action.trigger()
-        assert opened == [recent, recent]
+        window.recent_list.itemActivated.emit(window.recent_list.item(0))
+        assert opened == [recent, recent, recent]
+        window._imported(MediaInfo(tmp_path / "音轨.wav", 0, "pcm_s16le", "wav", 2))
+        window._sync_controls()
+        assert window.editor_page.isVisible()
+        assert not window.start_page.isVisible()
         QTest.keyClick(window, Qt.Key.Key_Tab, Qt.KeyboardModifier.ControlModifier)
         assert window.note_table.isVisible()
     finally:
@@ -124,9 +136,9 @@ def test_desktop_generates_calibrates_and_exports(app, window, tmp_path, monkeyp
             assert window._player is not None, window.status.text()
             wait_for(app, lambda: window._player and window._player.position() >= 150, timeout=10)
             assert not previous_path.exists()
-        window.melody_button.click()
+        window.play_button.click()
         wait_for(app, lambda: window._thread is None)
-        assert window._playing == "旋律", window.status.text()
+        assert window._playing == "演奏", window.status.text()
         wait_for(app, lambda: window._player and window._player.position() >= 150, timeout=10)
         final_path = window._preview_path
         window.stop_button.click()
@@ -144,23 +156,33 @@ def test_original_is_available_before_generation_without_soundfont(app, window, 
     window.open_source(source)
     wait_for(app, lambda: window._thread is None)
     assert window.original_button.isEnabled()
-    assert not window.melody_button.isEnabled()
     assert not window.play_button.isEnabled()
     window.original_button.click()
     wait_for(app, lambda: window._thread is None)
     assert window._playing == "原曲", window.status.text()
+    assert window.original_button.isChecked()
     wait_for(app, lambda: window._player and window._player.position() >= 150, timeout=10)
     original_path = window._preview_path
     window.pause_button.click()
     assert window._player.playbackState() == desktop.QMediaPlayer.PlaybackState.PausedState
+    assert window.pause_button.accessibleName() == "继续播放"
     window.timeline.setValue(1500)
     window.seek()
     assert window._player.position() == 1500
+    # Loading another track resumes only once; subsequent seeks stay put.
+    window.original_button.click()
+    wait_for(app, lambda: window._thread is None and window._player and window._player.position() >= 1500)
+    window.pause_button.click()
+    assert 1500 <= window._player.position() < 2300
+    window.timeline.setValue(2500)
+    window.seek()
+    assert window._player.position() == 2500
     window.pause_button.click()
     assert window._player.playbackState() == desktop.QMediaPlayer.PlaybackState.PlayingState
     window.stop_button.click()
     wait_for(app, lambda: not original_path.exists(), timeout=2)
     assert window._player is None and source.is_file()
+    assert not window.original_button.isChecked()
 
 
 def test_desktop_can_preview_stems_and_transcribe_only_vocals(app, window, tmp_path, monkeypatch):
@@ -191,6 +213,7 @@ def test_desktop_can_preview_stems_and_transcribe_only_vocals(app, window, tmp_p
     window.accompaniment_button.click()
     assert played == [(stems.vocals, "人声"), (stems.accompaniment, "伴奏")]
 
+    window.source_mode.setCurrentIndex(window.source_mode.findData("vocal"))
     window.generate_button.click()
     wait_for(app, lambda: window._thread is None)
     assert window.score is not None, window.status.text()
@@ -224,11 +247,60 @@ def test_desktop_can_preview_stems_and_transcribe_only_vocals(app, window, tmp_p
     window.open_source(project)
     wait_for(app, lambda: window._thread is None)
     assert window.stems is not None and window.stems.vocals.exists(), window.status.text()
-    assert window._analysis_vocals and window.source_mode.currentIndex() == 1
+    assert window._analysis_vocals and window.source_mode.currentData() == "vocal"
+    assert window.pitch_range.count() == 3 and window.pitch_range.currentIndex() == 0
     restored = window.stems
     window.open_source(source)
     wait_for(app, lambda: window._thread is None)
     assert not window.vocals_button.isEnabled() and not restored.vocals.exists()
+
+
+@pytest.mark.parametrize("mode", ["instrument", "vocal", "no_demucs", "failed"])
+def test_explicit_target_selects_the_input_and_never_falls_back_to_another_voice(app, window, tmp_path, monkeypatch, mode):
+    source = tmp_path / "mixed.wav"
+    write_wave(source, 3, [(0, 2.5, 40)])
+    window.tools = replace(window.tools, demucs_python="" if mode == "no_demucs" else "test-python")
+    lead = tuple(NoteEvent(f"v{i}", i * 0.5, i * 0.5 + 0.45, pitch, 0.5, 80)
+                 for i, pitch in enumerate((69, 67, 64, 62)))
+    beat = BeatEstimate(100, 0.12, True)
+    analyzed, separated = [], []
+
+    def analyze(media, *, vocals, find_beats, melody_only, options, **_):
+        assert melody_only and find_beats
+        analyzed.append(vocals)
+        return AnalysisResult(media, 3, lead, beat, candidate_overlap=0.8, options=options)
+
+    def separate(media, destination, **_):
+        separated.append(destination)
+        if mode == "failed":
+            raise NoteFlowError("SEPARATION_FAILED", "separate", "测试分离失败。")
+        destination.mkdir()
+        stems = Stems(destination / "vocals.wav", destination / "no_vocals.wav")
+        stems.vocals.touch()
+        stems.accompaniment.touch()
+        return stems
+
+    monkeypatch.setattr(pipeline, "analyze_media", analyze)
+    monkeypatch.setattr(pipeline, "separate", separate)
+    window.open_source(source)
+    wait_for(app, lambda: window._thread is None)
+    assert window.source_mode.currentData() == "instrument"
+    if mode != "instrument":
+        window.source_mode.setCurrentIndex(window.source_mode.findData("vocal"))
+    window.generate_button.click()
+    wait_for(app, lambda: window._thread is None)
+    if mode in {"failed", "no_demucs"}:
+        assert window.score is None and analyzed == []
+        assert window._stem_workspace is None
+    elif mode == "vocal":
+        assert analyzed == [window.stems.vocals]
+        assert window._analysis_vocals and window.score.melody == lead
+        window.generate_button.click()
+        wait_for(app, lambda: window._thread is None)
+        assert len(separated) == 1
+    else:
+        assert analyzed == [None] and separated == []
+        assert window.score.melody == lead and not window._analysis_vocals
 
 
 def test_desktop_cancellation_and_source_changes_discard_late_results(app, window, tmp_path, monkeypatch):
@@ -243,7 +315,7 @@ def test_desktop_cancellation_and_source_changes_discard_late_results(app, windo
         check_cancelled(cancel)
         pytest.fail("Expected the task to be cancelled")
 
-    monkeypatch.setattr(desktop, "analyze_media", slow_analyze)
+    monkeypatch.setattr(pipeline, "analyze_media", slow_analyze)
     window.open_source(sources[0])
     wait_for(app, lambda: window._thread is None)
     window.generate_button.click()

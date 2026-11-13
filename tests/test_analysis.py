@@ -96,6 +96,23 @@ def test_transcribed_melody_survives_louder_sustained_accompaniment(tmp_path, to
     assert [n.start_s for n in score.melody] == pytest.approx([start for start, _, _ in expected], abs=0.05)
 
 
+@pytest.mark.parametrize("accompaniment", [False, True], ids=["fast-notes", "backing-during-rests"])
+def test_melody_analysis_recovers_lead_from_basic_pitch_frames(tmp_path, tools, accompaniment):
+    expected = melody()
+    if not accompaniment:
+        expected = [(i * 0.25, i * 0.25 + 0.09, pitch) for i, (_, _, pitch) in enumerate(expected)]
+    wav = tmp_path / "melody.wav"
+    write_wave(wav, 10, expected, accompaniment=accompaniment)
+    info = media.probe(wav, tools["ffprobe"])
+
+    result = analysis.analyze_media(info, ffmpeg=tools["ffmpeg"], melody_only=True, verify_pitch=True)
+
+    assert [note.midi for note in result.notes] == [pitch for _, _, pitch in expected]
+    assert [note.start_s for note in result.notes] == pytest.approx([start for start, _, _ in expected], abs=0.05)
+    assert all(left.end_s <= right.start_s for left, right in zip(result.notes, result.notes[1:]))
+    assert (result.candidate_overlap > analysis.HEAVY_OVERLAP) == accompaniment
+
+
 @pytest.mark.parametrize(("kind", "code", "stage"), [
     ("no_audio", "NO_AUDIO", "probe"), ("corrupt", "DECODE_FAILED", "probe"),
     ("long", "INPUT_LIMIT", "probe"), ("silence", "NO_NOTES", "transcribe"),
