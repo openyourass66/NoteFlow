@@ -45,3 +45,22 @@ def test_frame_decoder_splits_reattack_and_preserves_a_real_rest_and_leap():
     assert [(start, end, pitch) for start, end, pitch, _ in events] == [
         (times[0], times[16], 60), (times[16], times[32], 60), (times[42], times[60], 48),
     ]
+
+
+def test_confident_bass_f0_cannot_pull_the_contextual_lead_down_an_octave(tmp_path, monkeypatch):
+    from noteflow import transcription, pitch
+    from noteflow.notes import NoteEvent
+
+    path = tmp_path / "lead-with-bass.wav"
+    write_wave(path, 2, [(0, 1.9, 72), (.7, .9, 60)])
+    frames = np.full((170, 88), .02)
+    frames[:, 72 - 21] = .65
+    frames[60:78, 60 - 21] = .85
+    onsets = np.zeros_like(frames)
+    onsets[60, 60 - 21] = .8
+    candidates = (NoteEvent("lead", 0, 1.9, 72, .65, 90), NoteEvent("bass", .7, .9, 60, .85, 100))
+    monkeypatch.setattr(transcription, "_predict", lambda *a, **kw: ({"note": frames.copy(), "onset": onsets}, candidates))
+    monkeypatch.setattr(pitch, "estimate_pitch", lambda *a: (np.array([0, 2]), np.full(2, 261.6256), np.full(2, .99), "cpu"))
+    notes, overlap = transcription.transcribe_melody(AudioAsset(path, 2, True), pitch_python="fixture")
+    assert overlap == .5
+    assert {note.midi for note in notes} == {72}

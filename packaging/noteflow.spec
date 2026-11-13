@@ -12,7 +12,8 @@ os.environ["PATH"] = os.pathsep.join(map(str, (Path(sys.executable).parent, wind
 analysis = Analysis(
     [str(directory / "launch.py")],
     pathex=[str(directory.parent / "src")],
-    datas=collect_data_files("basic_pitch", includes=["saved_models/icassp_2022/nmp.onnx"]),
+    datas=collect_data_files("basic_pitch", includes=["saved_models/icassp_2022/nmp.onnx"])
+          + [(str(directory.parent / "src/noteflow/pitch_worker.py"), "noteflow")],
     module_collection_mode={"librosa": "py"},
     excludes=["tensorflow", "IPython", "matplotlib", "pytest"],
 )

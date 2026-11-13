@@ -11,7 +11,7 @@ from .score import BAR, KEYS, PPQ, Score, to_text
 PROGRAMS = {"钢琴": 0, "尼龙吉他": 24, "小提琴": 40}
 
 
-def write_midi(score: Score, program: int, path: Path, *, original_timing: bool = False) -> None:
+def write_midi(score: Score, program: int, path: Path, *, original_timing: bool = True) -> None:
     midi = mido.MidiFile(type=0, ticks_per_beat=PPQ)
     track = midi.add_track()
     track.append(mido.MetaMessage("set_tempo", tempo=score.settings.tempo_us))
@@ -29,6 +29,7 @@ def write_midi(score: Score, program: int, path: Path, *, original_timing: bool 
 
     events = []
     for start, end, pitch, velocity in notes:
+        start, end = round(start), round(end)
         events.append((start, 1, pitch, velocity))
         events.append((max(start + 1, end), 0, pitch, 0))
     previous = 0

@@ -43,7 +43,7 @@ def _has_preset(path: Path, program: int) -> bool:
 
 def render_preview(
     score: Score, program: int, soundfont: Path, target: Path, fluidsynth: str,
-    cancel: Event, *, original_timing: bool = False,
+    cancel: Event, *, original_timing: bool = True,
 ) -> Path:
     check_cancelled(cancel)
     try:

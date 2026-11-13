@@ -19,6 +19,7 @@ class Tools:
     fluidsynth: str = "fluidsynth"
     soundfont: str = ""
     demucs_python: str = ""
+    pitch_python: str = ""
 
 
 def _tool_directories() -> tuple[Path, ...]:
@@ -46,14 +47,15 @@ def _default_tools() -> Tools:
         find("ffprobe.exe", "ffmpeg/bin/ffprobe.exe", "ffmpeg/*/bin/ffprobe.exe") or "ffprobe",
         find("fluidsynth.exe", "fluidsynth/bin/fluidsynth.exe", "fluidsynth/*/bin/fluidsynth.exe") or "fluidsynth",
         find("*.sf2"),
-        find("demucs/Scripts/python.exe"),
+        find("inference/Scripts/python.exe", "demucs/Scripts/python.exe"),
+        find("inference/Scripts/python.exe"),
     )
 
 
 def load_tools(settings: QSettings) -> Tools:
     defaults = _default_tools()
     values = {}
-    for name in ("ffmpeg", "ffprobe", "fluidsynth", "soundfont", "demucs_python"):
+    for name in ("ffmpeg", "ffprobe", "fluidsynth", "soundfont", "demucs_python", "pitch_python"):
         fallback = getattr(defaults, name)
         configured = settings.value(f"tools/{name}", fallback, str)
         if name in ("ffmpeg", "ffprobe", "fluidsynth", "demucs_python") and configured.lower() in ("", name, f"{name}.exe"):
@@ -72,7 +74,7 @@ def edit_tools(parent: QWidget, settings: QSettings, tools: Tools) -> Tools:
     edits = {}
     for name, label in (("ffmpeg", "FFmpeg"), ("ffprobe", "ffprobe"),
                         ("fluidsynth", "FluidSynth"), ("soundfont", "SoundFont（SF2）"),
-                        ("demucs_python", "Demucs Python")):
+                        ("demucs_python", "分离环境 Python"), ("pitch_python", "音高复核 Python（可选）")):
         edit = QLineEdit(getattr(tools, name))
         edit.setMinimumHeight(36)
         edit.setAccessibleName(label)

@@ -16,8 +16,8 @@ $nfPython = '.\.venv\Scripts\python.exe'
 | 功能 | 需准备的工具 |
 | --- | --- |
 | 导入、解码和识别 | FFmpeg 与 ffprobe |
-| 合成旋律或简谱的试听和 WAV 导出 | FluidSynth 与 GM SoundFont（`.sf2`） |
-| 分离人声与伴奏 | 安装了 Demucs 的独立 Python 环境 |
+| 内置乐器演奏和 WAV 导出 | FluidSynth 与 GM SoundFont（`.sf2`） |
+| 分离人声与伴奏、神经网络音高复核 | 可选的独立推理环境，支持 NVIDIA CUDA |
 
 桌面版会查找项目根目录下的 `.tools`，也可从 `PATH` 查找 FFmpeg、ffprobe 和 FluidSynth，或在右上角「⋯ → 工具设置」指定工具和音源路径。可将 `.sf2` 直接放入 `.tools`。工具来源见 [第三方组件与外部工具](docs/third-party.md)。
 
@@ -26,12 +26,12 @@ $nfPython = '.\.venv\Scripts\python.exe'
 ## 桌面工作台
 
 1. **导入媒体**。点击启动页的「导入媒体」、工作区左上角的导入图标，或将文件拖入窗口。支持 PCM WAV、MP3 和含 AAC 音轨的 MP4 / M4A。处理首条音轨，单文件最大 200 MB，音轨最长 120 秒。
-2. **生成简谱**。桌面版用 Basic Pitch 的逐帧音高和起音追踪单声部旋律，可切分同音反复。默认使用「自动」。已配置 Demucs 时，检测到较多重叠音会尝试分离人声，优先采用有足够旋律且重叠更少的人声轨。清唱或独奏可直接选择「原曲 / 独奏」。也可手动点击「分离人声与伴奏」，再选择「分离人声」。人声简谱使用原曲的拍点，并用 pYIN 复核人声旋律的八度。
+2. **选择目标并生成**。选「乐器主旋律」或「人声主旋律」。自动选源时，乐器分析原曲，人声先分离；清唱或独奏可选择「直接识别原曲」。需要排除演唱时，乐器目标可选择「先分离伴奏／人声」。选「分轨试听」只准备人声与伴奏，不改变提取目标。如果跟错声部，可选较高／较低声部后重新生成。模型证据偏弱的音符在编辑页标为「待复核」。
 3. **校准和编辑**。在谱面上方展开「节奏与调号」，修改 BPM、首拍偏移或主音后应用。切换到「音符编辑」，双击单元格可调整音符起止时间、MIDI 音高和力度，也可添加、删除音符或升降半音和八度。音符编辑和节奏校准支持撤销与重做。
-4. **对照试听**。点击底部的音轨开始播放。选用钢琴、尼龙吉他或小提琴后，「旋律」按识别音符的起止时间播放，「简谱」按量化后的谱面节奏播放。播放时可暂停、拖动进度、调整音量和 0.5–1.5 倍速，也可点击谱面音符定位。
+4. **对照试听**。选择钢琴、尼龙吉他或小提琴，点击「演奏」。简谱、演奏和 MIDI 共用同一份音符；演奏保留识别／编辑后的起止时间，排谱校准只改变显示。切换原曲、人声、伴奏和演奏时保留播放位置，便于对照。支持暂停、拖动进度、音量、0.5–1.5 倍速和点击谱面定位。
 5. **保存或导出**。工作区左上角的保存图标生成 `.noteflow` 文件，保存解码后的原曲、已有分轨、识别结果、手工修正、谱面设置和音色。可从启动页「打开项目」或「最近项目」恢复，无需原始媒体。工作区也提供打开项目的文件夹图标和「⋯ → 最近项目」。「导出」菜单可生成 UTF-8 TXT、MIDI，以及已有分轨或合成音轨的 WAV。
 
-简谱采用固定 4/4 拍和恒定速度，适合清晰的单声部旋律。混音分离后的人声轨可能仍含和声或伴奏残留。
+简谱目前采用固定 4/4 拍、恒定速度和十六分音符网格；三连音和自由速度还不能准确排版，但不会把演奏强制吸附到网格。分离人声不等于分离主唱，伴奏分轨也不等于单一主奏乐器。复杂混音仍需试听复核，没有已校准的准确率承诺。当前先完善本地效果，尚未实现云端服务。
 
 | 操作 | 快捷键 |
 | --- | --- |
@@ -41,20 +41,22 @@ $nfPython = '.\.venv\Scripts\python.exe'
 | 切换简谱与音符编辑 | `Ctrl+Tab` |
 | 撤销 / 重做 | `Ctrl+Z` / `Ctrl+Y` |
 
-「⋯ → 使用说明」可查看工作台内的操作提示。取消识别时，程序会等待当前推理结束。
+「⋯ → 使用说明」可查看操作提示。Basic Pitch 按窗口检查取消；分离和神经音高复核通过独立进程运行，取消时终止该任务。未安装神经音高环境时，部分单声部使用 pYIN 复核，它需等待当前调用结束。
 
-### 安装可选的人声分离环境
+### 安装可选的本地 GPU 推理环境
 
-Windows 上使用独立的 Python 3.11 x64 环境安装 Demucs，桌面程序会自动查找项目的 `.tools\demucs`。已有 `.venv-m0` 时，也可以用其中的 Python 代替下方的 `py -3.11`。
+Windows 上使用独立的 Python 3.11 x64 环境，避免把 PyTorch 和 CUDA 打入桌面主程序。桌面程序自动查找 `.tools\inference`，GPU 可用时使用 CUDA，否则使用 CPU。已在 RTX 4060 Laptop 8 GB 上验证以下组合：
 
 ```powershell
-py -3.11 -m venv .tools\demucs
-$nfDemucsPython = '.\.tools\demucs\Scripts\python.exe'
-& $nfDemucsPython -m pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-& $nfDemucsPython -m pip install demucs==4.0.1 soundfile==0.14.0 numpy==1.26.4
+py -3.11 -m venv .tools\inference
+$nfInference = '.\.tools\inference\Scripts\python.exe'
+& $nfInference -m pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
+& $nfInference -m pip install -r .\packaging\requirements-inference-win.txt
+& $nfInference -m pip check
+& $nfInference -c 'import torch; print(torch.cuda.is_available())'
 ```
 
-首次分离会联网下载约 84 MB 的 HT Demucs 模型权重。推理在本地 CPU 上运行。环境安装在其他位置时，在「工具设置」的「Demucs Python」一栏选择该环境的 `python.exe`。
+没有 NVIDIA GPU 时，将安装索引末尾的 `cu126` 改成 `cpu`。首次分离会下载 HT Demucs 权重；torchcrepe 使用包内的 full 权重。准备完成后，音频在本地处理，不上传。环境安装在其他位置时，在「工具设置」中把「分离环境 Python」和「音高复核 Python」指向该环境。清空后者可停用神经音高复核；分离仍兼容旧的 `.tools\demucs` 环境。依赖及模型来源见 [第三方组件](docs/third-party.md)。
 
 ## 命令行识别
 
@@ -63,12 +65,13 @@ $nfDemucsPython = '.\.tools\demucs\Scripts\python.exe'
 ```powershell
 & $nfPython -m noteflow 'C:\Music\旋律.mp4' `
     --ffmpeg 'C:\tools\ffmpeg\bin\ffmpeg.exe' `
-    --ffprobe 'C:\tools\ffmpeg\bin\ffprobe.exe'
+    --ffprobe 'C:\tools\ffmpeg\bin\ffprobe.exe' `
+    --target instrument --pitch-python $nfInference
 ```
 
 只使用命令行时，安装命令可用 `-e .` 省去桌面依赖。
 
-标准输出为 UTF-8 JSON，包含音轨索引、实际解码时长和候选音符。音符含起止秒数、MIDI 音高、模型幅值和力度。添加 `--demucs-python $nfDemucsPython` 可先分离人声，再输出经八度复核的人声候选音符。
+命令行与桌面使用相同的主旋律流程。标准输出为 UTF-8 JSON，包含音轨索引、实际解码时长、主旋律音符、提取设置和待复核区间。音符含起止秒数、MIDI 音高、模型幅值和力度。人声用 `--target vocal --demucs-python $nfInference`；清唱可加 `--source original`。限定音域用 `--pitch-min 60 --pitch-max 96`。未指定 `--pitch-python` 时不启用神经音高复核。
 
 ## 开发与打包
 
@@ -81,6 +84,8 @@ $nfDemucsPython = '.\.tools\demucs\Scripts\python.exe'
 ```
 
 构建输出在 `dist\NoteFlow`。将测试或试听生成的个人媒体、项目与导出文件保存在工作区外，或使用项目根目录下已被忽略的 `.poc-output`。历史测试结果见 [Windows 验收记录](docs/acceptance.md)。
+
+本次重构构建可用 `--distpath dist/rebuild --workpath build/rebuild` 单独输出，不覆盖旧目录包。迁移内容与实测边界见 [本地重构验证记录](docs/本地重构验证记录.md)。旧 `.noteflow` 项目可读取，新保存格式为版本 2。
 
 ## 运行 M0
 

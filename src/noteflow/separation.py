@@ -1,4 +1,4 @@
-"""Split the first audio stream with an external Demucs CPU environment."""
+"""Split the first audio stream with an external Demucs environment."""
 
 import wave
 from dataclasses import dataclass
@@ -21,7 +21,7 @@ class Stems:
 
 
 def separate(media: MediaInfo, destination: Path, *, python: str, ffmpeg: str = "ffmpeg",
-             cancel: Event | None = None) -> Stems:
+             cancel: Event | None = None, device: str = "auto") -> Stems:
     """Publish both stems together into a new directory owned by the caller."""
     if not python:
         raise NoteFlowError("TOOL_NOT_FOUND", "separate", "请在工具设置中选择已安装 Demucs 的 Python。")
@@ -29,8 +29,14 @@ def separate(media: MediaInfo, destination: Path, *, python: str, ffmpeg: str = 
     with TemporaryDirectory(prefix="split-", dir=destination.parent) as directory:
         work = Path(directory)
         mix = decode_original(media, work / "mix.wav", ffmpeg, cancel, sample_rate=STEM_RATE)
+        if device not in ("auto", "cpu", "cuda"):
+            raise ValueError("Unknown device")
+        if device == "auto":
+            available = run_tool(python, "separate", 30,
+                                 ("-I", "-c", "import torch; print('cuda' if torch.cuda.is_available() else 'cpu')"), cancel)
+            device = available.decode().strip()
         run_tool(python, "separate", 900, (
-            "-I", "-m", "demucs.separate", "-n", MODEL, "-d", "cpu", "--shifts", "0",
+            "-I", "-m", "demucs.separate", "-n", MODEL, "-d", device, "--shifts", "0",
             "--two-stems", "vocals", "--filename", "{stem}.{ext}", "-o", str(work), str(mix),
         ), cancel)
         output = work / MODEL
