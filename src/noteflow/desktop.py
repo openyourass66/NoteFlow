@@ -36,8 +36,8 @@ from .synthesis import render_preview
 from .review import STATUS_TEXT
 from .review_edit import apply_manual, load_report, write_report
 from .review_service import prepare_audition, prepare_repairs, review_score
-from .review_results_ui import CandidateAuditionDialog
-from .review_ui import ReviewDialog, show_report, show_calibration
+from .review_results_ui import ReviewReportDialog
+from .review_ui import ReviewDialog, show_calibration
 from .review_calibration import check_reviewer
 
 LOG = logging.getLogger("noteflow")
@@ -115,6 +115,7 @@ class MainWindow(QMainWindow):
         self._analysis_vocals = False
         self._review_key = ""
         self._review_result = self._review_report_path = None
+        self._review_dialog = None
         self._revision = 0
         self._thread = self._worker = self._cancel = self._callback = None
         self._pending_source = None
@@ -195,6 +196,8 @@ class MainWindow(QMainWindow):
 
     def _status(self, text):
         self.status.setText(text)
+        if self._review_dialog is not None:
+            self._review_dialog.set_status(text)
 
     @Slot(str)
     def _job_progress(self, text):
@@ -230,6 +233,10 @@ class MainWindow(QMainWindow):
         value, error = self._worker.outcome or (None, NoteFlowError("UNEXPECTED", "worker", "后台任务中断。"))
         self._thread.deleteLater()
         self._thread = self._worker = self._cancel = self._callback = None
+        if self._review_dialog is not None:
+            self._review_dialog.set_busy(False)
+            if self._closing or self._pending_source is not None:
+                self._review_dialog.reject()
         if (cancelled or error or self._pending_source is not None or self._closing) and self._loading_workspace:
             self._loading_workspace.cleanup()
             self._loading_workspace = None
@@ -300,27 +307,37 @@ class MainWindow(QMainWindow):
         self._start("正在准备音频复核…", operation, finished, keep_cancelled=True)
 
     def show_review_report(self):
-        if self._review_result is None or self.score is None or self._thread is not None or self._closing:
+        if (self._review_result is None or self.score is None or self._thread is not None
+                or self._review_dialog is not None or self._closing):
             return
-        action = show_report(self, self._review_result, self._review_report_path, self.score.melody)
-        if action is None:
-            return
-        if action.kind == "locate":
-            issue = action.issues[0]
-            self.tabs.setCurrentIndex(1)
-            notes = self.score.melody
-            if notes:
-                note = next((n for n in notes if n.end_s > issue.start_s and n.start_s < issue.end_s),
-                            min(notes, key=lambda n: abs(n.start_s - issue.start_s)))
-                self._select_note(note.id)
-                self.note_table.scrollToItem(self.note_table.item(self.note_table.currentRow(), 0))
-            self._status(f"已定位 {issue.start_s:.2f}–{issue.end_s:.2f} 秒；可编辑音高和起止时间，Ctrl+Z 撤销。")
-        elif action.kind == "prepare":
-            self._prepare_review_candidates(action.issues)
-        elif action.kind == "preview":
-            self._preview_review_candidate(action.candidate)
-        elif action.kind == "apply":
-            self._apply_review_candidate(action.candidate)
+        self._stop_player()
+        self._sync_controls()
+        dialog = ReviewReportDialog(self, self._review_result, self._review_report_path, self.score.melody)
+        self._review_dialog = dialog
+        dialog.output.setVolume(self._audio.volume())
+        dialog.prepare_requested.connect(self._prepare_review_candidates)
+        dialog.audition_requested.connect(self._preview_review_candidate)
+        dialog.apply_requested.connect(self._apply_review_candidate)
+        dialog.locate_requested.connect(self._locate_review_issue)
+        dialog.cancel_requested.connect(self.cancel_job)
+
+        def closed():
+            self._review_dialog = None
+            dialog.deleteLater()
+
+        dialog.finished.connect(closed)
+        dialog.open()
+
+    def _locate_review_issue(self, issue):
+        self._review_dialog.accept()
+        self.tabs.setCurrentIndex(1)
+        notes = self.score.melody
+        if notes:
+            note = next((n for n in notes if n.end_s > issue.start_s and n.start_s < issue.end_s),
+                        min(notes, key=lambda n: abs(n.start_s - issue.start_s)))
+            self._select_note(note.id)
+            self.note_table.scrollToItem(self.note_table.item(self.note_table.currentRow(), 0))
+        self._status(f"已定位 {issue.start_s:.2f}–{issue.end_s:.2f} 秒。")
 
     def _review_stem(self):
         options = self.analysis.options
@@ -357,10 +374,11 @@ class MainWindow(QMainWindow):
         self._sync_controls()
         return True
 
-    def _prepare_review_candidates(self, issues):
-        if not issues:
+    def _prepare_review_candidates(self):
+        dialog = self._review_dialog
+        if not dialog.issues or self._thread is not None:
             return
-        self._stop_player()
+        issues = dialog.issues
         analysis, score, tools, result = self.analysis, self.score, self.tools, self._review_result
         stem = self._review_stem()
         folder = self.workdir / f"repair-{uuid4().hex}"
@@ -372,24 +390,22 @@ class MainWindow(QMainWindow):
             updated = replace(result, notes=score.melody, candidates=plan.candidates,
                               status="candidates" if plan.candidates else "unsupported", events=(*result.events, *events))
             if self._store_review_result(updated):
-                self._status(f"本地生成 {len(plan.candidates)} 个候选，尚未应用；本次未调用云端。")
-                self.show_review_report()
+                dialog.set_result(updated, self._review_report_path)
+                if not plan.candidates:
+                    self._status("未找到有音频证据的候选，可在详情中定位音符。")
+        dialog.set_busy(True)
         self._start("正在重建复核疑点片段…", operation, finished)
 
-    def _preview_review_candidate(self, candidate):
-        self._stop_player()
+    def _preview_review_candidate(self, candidate, track):
+        dialog = self._review_dialog
+        if self._thread is not None:
+            return
         analysis, score, tools = self.analysis, self.score, self.tools
         folder = self.workdir / f"audition-{uuid4().hex}"
         def operation(cancel, progress):
             return prepare_audition(analysis, score, candidate, tools, folder, cancel=cancel)
-        def finished(value):
-            paths, first, last = value
-            dialog = CandidateAuditionDialog(self, paths, first, last)
-            if dialog.exec():
-                self._apply_review_candidate(candidate)
-            dialog.deleteLater()
-            QTimer.singleShot(0, self.show_review_report)
-        self._start("正在生成原曲／修改前／候选对照音频…", operation, finished)
+        dialog.set_busy(True)
+        self._start("正在准备对照试听…", operation, lambda value: dialog.play_audition(value, track))
 
     def _apply_review_candidate(self, candidate):
         try:
@@ -399,6 +415,8 @@ class MainWindow(QMainWindow):
             return
         if self._store_review_result(updated):
             self._apply_notes(updated.notes)
+            if self._review_dialog is not None:
+                self._review_dialog.accept()
             self._status("候选已应用：简谱与演奏已更新，可用 Ctrl+Z 撤销；尚未重新通过云端复核。")
 
     def choose_source(self):
@@ -716,6 +734,8 @@ class MainWindow(QMainWindow):
         return answer == QMessageBox.StandardButton.Discard
 
     def _clear_session(self):
+        if self._review_dialog is not None:
+            self._review_dialog.reject()
         self._stop_player()
         self._playhead_ms = 0
         self._clear_stems()
@@ -1047,7 +1067,7 @@ class MainWindow(QMainWindow):
             "3. 在音符编辑页修正音高、起止时间和力度，Ctrl+Z 可撤销。\n"
             "4. 演奏保留原始节奏，排谱校准不改变声音；点击音符可定位。\n"
             "5. Ctrl+S 保存项目。项目包含原曲、分轨和音符，可离线恢复。\n"
-            "6. 音频复核结果中可重建疑点片段，对照试听后应用候选；也可定位音符编辑。\n"
+            "6. 音频复核结果中可直接对照试听，并应用候选到简谱。「查看详情」可定位音符。\n"
             "7. 复核记录需单独导出；在更多菜单中可导入对应项目的记录，无需重新上传。\n\n"
             "当前支持固定 4/4 拍、恒定速度和最长 120 秒片段。")
 
@@ -1058,6 +1078,8 @@ class MainWindow(QMainWindow):
             self._pending_source = None
             self.cancel_job()
             return
+        if self._review_dialog is not None:
+            self._review_dialog.reject()
         if not self._confirm_discard(self.close):
             self._closing = False
             event.ignore()

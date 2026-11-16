@@ -66,7 +66,7 @@ $nfInference = '.\.tools\inference\Scripts\python.exe'
 2. 建议先点击「检查复核能力（6 次）」。仅上传内置旋律，检查正确演奏、错音高、错八度、断奏与交换顺序对照。不修改当前乐谱；检查通过也不代表实际歌曲准确。
 3. 选择复核范围，默认前 20 秒；可选整段。设置轮数和请求上限，点击「上传并开始复核」才会发送原曲及演奏音频。默认最多 24 次请求，失败不自动重试；这是调用次数限制，并非金额上限。
 4. 自动修正仍需在交换顺序的两次对照中都获支持才采用。停止时保留此前已采用的版本，以及尚未采纳的候选。
-5. 在「复核结果与乐谱修改」窗口选中疑点，可点击「重建所选片段」或「生成全部局部候选」。这些操作只在本地重新分析，不再次上传。选择候选后，对照试听「原曲／修改前／候选」，再点击「应用所选候选」；简谱和演奏同步更新，Ctrl+Z 可撤销，Ctrl+S 保存。也可直接「定位到音符编辑」。
+5. 结果窗口默认选中第一个候选。直接点击「原曲」「修改前」或「候选」试听，满意后点「应用到简谱」。Ctrl+Z 撤销，Ctrl+S 保存。没有候选时可点击「生成候选」，在本地重建疑点片段。「查看详情」可定位音符或导出记录。
 
 Key 只在本次进程内保留，不写入设置、项目、日志或复核报告。也可在启动前设置 `DASHSCOPE_API_KEY`；服务地址和模型可用 `NOTEFLOW_REVIEW_BASE_URL`、`NOTEFLOW_REVIEW_MODEL` 预填。读取 `.env` 文件不会自动生效。普通导入、识别、播放始终使用本地流程。
 
@@ -111,9 +111,7 @@ Key 只在本次进程内保留，不写入设置、项目、日志或复核报�
 
 本次重构构建可用 `--distpath dist/rebuild --workpath build/rebuild` 单独输出，不覆盖旧目录包。迁移内容与实测边界见 [本地重构验证记录](docs/本地重构验证记录.md)。旧 `.noteflow` 项目可读取，新保存格式为版本 2。
 
-音频复核版本可用 `--distpath dist/audio-review --workpath build/audio-review` 单独构建，入口为 `dist/audio-review/NoteFlow/NoteFlow.exe`。旧目录包仍可使用。
-
-包含候选试听与手动应用的版本可用 `--distpath dist/audio-review-edit --workpath build/audio-review-edit` 构建，入口为 `dist/audio-review-edit/NoteFlow/NoteFlow.exe`。
+音频复核版本可用 `--distpath dist/audio-review-simple --workpath build/audio-review-simple` 单独构建，入口为 `dist/audio-review-simple/NoteFlow/NoteFlow.exe`。
 
 ## 运行 M0
 

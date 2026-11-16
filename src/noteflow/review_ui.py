@@ -119,15 +119,6 @@ class ReviewDialog(QDialog):
         self.accept()
 
 
-def show_report(parent, result, report_path, current_notes=None):
-    from .review_results_ui import ReviewReportDialog
-    dialog = ReviewReportDialog(parent, result, report_path, current_notes if current_notes is not None else result.notes)
-    dialog.exec()
-    action = dialog.action
-    dialog.deleteLater()
-    return action
-
-
 def show_calibration(parent, report):
     dialog = QDialog(parent)
     dialog.setWindowTitle("复核能力检查")

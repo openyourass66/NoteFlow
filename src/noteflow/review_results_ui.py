@@ -1,160 +1,295 @@
-"""Turn review feedback into navigation, local proposals and reversible edits."""
+"""Review candidates, aligned playback and optional diagnostic details."""
 
-from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QLabel, QListWidget,
-    QPlainTextEdit, QPushButton, QSlider, QVBoxLayout,
+    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QPlainTextEdit,
+    QPushButton, QSlider, QVBoxLayout, QWidget,
 )
 
-from .review import RepairCandidate, ReviewIssue, STATUS_TEXT, fingerprint
+from .desktop_theme import ComboBox
+from .review import STATUS_TEXT, fingerprint
 from .review_edit import latest_issues, note_changes
 
 KIND_TEXT = {"pitch": "音高", "octave": "八度", "rhythm": "节奏", "fragmentation": "连贯性",
              "wrong_voice": "声部", "missing_notes": "漏音"}
 
 
-@dataclass(frozen=True, slots=True)
-class ReviewAction:
-    kind: str
-    issues: tuple[ReviewIssue, ...] = ()
-    candidate: RepairCandidate | None = None
-
-
 class ReviewReportDialog(QDialog):
+    prepare_requested = Signal()
+    locate_requested = Signal(object)
+    audition_requested = Signal(object, int)
+    apply_requested = Signal(object)
+    cancel_requested = Signal()
+
     def __init__(self, parent, result, report_path, current_notes):
         super().__init__(parent)
-        self.result, self.report_path, self.current = result, report_path, current_notes
-        self.action = None
-        self.issues = latest_issues(result)
         self.setWindowTitle("复核结果与乐谱修改")
-        self.resize(800, 640)
+        self.resize(650, 240)
+        self.current = current_notes
+        self.signature = fingerprint(current_notes)
+        self.busy = False
+        self.paths = ()
+        self.resume_position = 0
+
         layout = QVBoxLayout(self)
-        header = QLabel(STATUS_TEXT[result.status] +
-                        f"\n范围 {result.start_s:.2f}–{result.end_s:.2f} 秒 · 请求 {result.calls} 次 · 自动采用 {result.accepted} 轮")
-        header.setTextFormat(Qt.TextFormat.PlainText)
-        header.setWordWrap(True)
-        layout.addWidget(header)
-        self.notice = QLabel("以下是最近一轮的疑点。可定位编辑，或在本地重建候选后试听、应用；云端意见可能有误。")
-        if fingerprint(current_notes) != fingerprint(result.notes):
-            self.notice.setText("当前乐谱已变化：旧候选不能直接应用。可按原疑点重新生成候选，再对照试听。")
-        self.notice.setWordWrap(True)
-        layout.addWidget(self.notice)
-        row = QHBoxLayout()
-        self.issue_list = QListWidget()
-        self.issue_list.setAccessibleName("复核疑点列表")
-        self.issue_list.setMinimumWidth(210)
-        self.issue_list.setMaximumWidth(275)
-        for issue in self.issues:
-            self.issue_list.addItem(f"{issue.start_s:.2f}–{issue.end_s:.2f} 秒 · {KIND_TEXT[issue.kind]}")
-        row.addWidget(self.issue_list)
-        self.issue_detail = QPlainTextEdit()
-        self.issue_detail.setReadOnly(True)
-        self.issue_detail.setAccessibleName("问题与本地处理原因")
-        row.addWidget(self.issue_detail, 1)
-        layout.addLayout(row, 2)
-        actions = QHBoxLayout()
-        self.locate = QPushButton("定位到音符编辑")
-        self.prepare = QPushButton("重建所选片段")
-        self.prepare_all = QPushButton("生成全部局部候选")
-        for button in (self.locate, self.prepare, self.prepare_all):
-            button.setMinimumHeight(36)
-            actions.addWidget(button)
-        self.locate.clicked.connect(lambda: self.choose("locate", selected=True))
-        self.prepare.clicked.connect(lambda: self.choose("prepare", selected=True))
-        self.prepare_all.clicked.connect(lambda: self.choose("prepare"))
-        layout.addLayout(actions)
-        layout.addWidget(QLabel("候选修改（尚未自动采用）"))
-        self.candidate_list = QComboBox()
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetFixedSize)
+        self.header = QLabel()
+        self.header.setTextFormat(Qt.TextFormat.PlainText)
+        self.header.setWordWrap(True)
+        self.header.setMinimumWidth(600)
+        layout.addWidget(self.header)
+
+        self.candidate_panel = QWidget()
+        panel = QVBoxLayout(self.candidate_panel)
+        panel.setContentsMargins(0, 0, 0, 0)
+        selection = QHBoxLayout()
+        label = QLabel("修改候选")
+        self.candidate_list = ComboBox()
         self.candidate_list.setAccessibleName("局部修改候选")
         self.candidate_list.setMinimumHeight(36)
-        for candidate in result.candidates:
-            self.candidate_list.addItem(candidate.title)
-        layout.addWidget(self.candidate_list)
-        self.changes = QPlainTextEdit()
-        self.changes.setReadOnly(True)
-        self.changes.setAccessibleName("候选音符改动明细")
-        layout.addWidget(self.changes, 2)
-        candidate_actions = QHBoxLayout()
-        self.preview = QPushButton("对照试听原曲／修改前／候选…")
-        self.apply = QPushButton("应用所选候选")
-        self.apply.setObjectName("primary")
-        for button in (self.preview, self.apply):
-            button.setMinimumHeight(36)
-            candidate_actions.addWidget(button)
-        self.preview.clicked.connect(lambda: self.choose("preview"))
-        self.apply.clicked.connect(lambda: self.choose("apply"))
-        layout.addLayout(candidate_actions)
-        self.error = QLabel()
-        self.error.setTextFormat(Qt.TextFormat.PlainText)
-        self.error.setWordWrap(True)
-        layout.addWidget(self.error)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
-        export = buttons.addButton("导出记录…", QDialogButtonBox.ButtonRole.ActionRole)
-        export.clicked.connect(self.export)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        self.issue_list.currentRowChanged.connect(self.refresh_issue)
-        self.candidate_list.currentIndexChanged.connect(self.refresh_candidate)
-        self.issue_list.setCurrentRow(0)
-        self.refresh_issue()
-        self.refresh_candidate()
+        label.setBuddy(self.candidate_list)
+        selection.addWidget(label)
+        selection.addWidget(self.candidate_list, 1)
+        panel.addLayout(selection)
 
-    def refresh_issue(self, *_):
-        index = self.issue_list.currentRow()
-        selected = 0 <= index < len(self.issues)
-        self.locate.setEnabled(selected)
-        self.prepare.setEnabled(selected)
-        self.prepare_all.setEnabled(bool(self.issues))
+        self.output = QAudioOutput(self)
+        self.player = QMediaPlayer(self)
+        self.player.setAudioOutput(self.output)
+        self.player.mediaStatusChanged.connect(self._loaded)
+        self.player.errorOccurred.connect(self._playback_error)
+        self.player.playbackStateChanged.connect(self._playback_state)
+        track_group = QFrame()
+        track_group.setObjectName("tracks")
+        tracks = QHBoxLayout(track_group)
+        tracks.setContentsMargins(3, 3, 3, 3)
+        tracks.setSpacing(2)
+        self.track_buttons = []
+        for index, name in enumerate(("原曲", "修改前", "候选")):
+            button = QPushButton(name)
+            button.setObjectName("track")
+            button.setCheckable(True)
+            button.setMinimumHeight(36)
+            button.clicked.connect(lambda _, i=index: self._choose_track(i))
+            self.track_buttons.append(button)
+            tracks.addWidget(button, 1)
+        controls = QHBoxLayout()
+        controls.addWidget(track_group, 1)
+        self.stop = QPushButton("停止")
+        self.stop.setMinimumHeight(36)
+        self.stop.clicked.connect(self.player.stop)
+        controls.addWidget(self.stop)
+        panel.addLayout(controls)
+        self.timeline = QSlider(Qt.Orientation.Horizontal)
+        self.timeline.setAccessibleName("对照试听进度")
+        self.timeline.sliderReleased.connect(lambda: self.player.setPosition(self.timeline.value()))
+        self.player.positionChanged.connect(self._position_changed)
+        panel.addWidget(self.timeline)
+        layout.addWidget(self.candidate_panel)
+
+        self.status = QLabel()
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
+        self.status.setWordWrap(True)
+        self.status.setAccessibleName("复核操作状态")
+        layout.addWidget(self.status)
+
+        self.details = QWidget()
+        details = QVBoxLayout(self.details)
+        details.setContentsMargins(0, 0, 0, 0)
+        self.issue_list = QListWidget()
+        self.issue_list.setAccessibleName("复核疑点列表")
+        self.issue_list.setMaximumHeight(108)
+        details.addWidget(self.issue_list)
+        self.issue_detail = QPlainTextEdit()
+        self.issue_detail.setReadOnly(True)
+        self.issue_detail.setAccessibleName("复核疑点与音符改动")
+        self.issue_detail.setFixedHeight(128)
+        details.addWidget(self.issue_detail)
+        detail_actions = QHBoxLayout()
+        self.locate = QPushButton("定位音符")
+        self.locate.clicked.connect(self._locate)
+        self.export_button = QPushButton("导出记录…")
+        self.export_button.clicked.connect(self.export)
+        detail_actions.addWidget(self.locate)
+        detail_actions.addWidget(self.export_button)
+        detail_actions.addStretch()
+        details.addLayout(detail_actions)
+        self.details.hide()
+        layout.addWidget(self.details)
+
+        actions = QHBoxLayout()
+        self.details_toggle = QPushButton("查看详情")
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.setObjectName("quiet")
+        self.details_toggle.toggled.connect(self._toggle_details)
+        actions.addWidget(self.details_toggle)
+        actions.addStretch()
+        self.prepare = QPushButton("生成候选")
+        self.apply = QPushButton("应用到简谱")
+        for button in (self.prepare, self.apply):
+            button.setObjectName("primary")
+            button.setMinimumHeight(36)
+            button.setAutoDefault(False)
+            actions.addWidget(button)
+        self.prepare.clicked.connect(self.prepare_requested)
+        self.apply.clicked.connect(self._apply)
+        self.close_button = QPushButton("关闭")
+        self.close_button.setMinimumHeight(36)
+        self.close_button.clicked.connect(self.reject)
+        actions.addWidget(self.close_button)
+        layout.addLayout(actions)
+
+        self.issue_list.currentRowChanged.connect(self._refresh_details)
+        self.candidate_list.currentIndexChanged.connect(self._candidate_changed)
+        self.set_result(result, report_path)
+        self.close_button.setFocus()
+
+    def set_result(self, result, report_path):
+        self.result, self.report_path = result, report_path
+        self.issues = latest_issues(result)
+        self.candidates = tuple(c for c in result.candidates if c.baseline_fingerprint == self.signature)
+        stale = self.signature != fingerprint(result.notes)
+        summary = "乐谱已修改，可重新生成候选。" if stale else STATUS_TEXT[result.status]
+        self.header.setText(summary + f"\n{result.start_s:.2f}–{result.end_s:.2f} 秒 · 云端请求 {result.calls} 次 · 自动采用 {result.accepted} 轮")
+        self.issue_list.blockSignals(True)
+        self.issue_list.clear()
+        for issue in self.issues:
+            self.issue_list.addItem(f"{issue.start_s:.2f}–{issue.end_s:.2f} 秒 · {KIND_TEXT[issue.kind]}")
+        self.issue_list.setCurrentRow(0)
+        self.issue_list.blockSignals(False)
+        self.candidate_list.blockSignals(True)
+        self.candidate_list.clear()
+        self.candidate_list.addItems([c.title for c in self.candidates])
+        self.candidate_list.blockSignals(False)
+        self._candidate_changed()
+        self.set_busy(self.busy)
+
+    @property
+    def candidate(self):
+        index = self.candidate_list.currentIndex()
+        return self.candidates[index] if index >= 0 else None
+
+    def set_busy(self, busy):
+        self.busy = busy
+        self.candidate_panel.setVisible(bool(self.candidates))
+        self.candidate_list.setEnabled(not busy)
+        for button in self.track_buttons:
+            button.setEnabled(not busy)
+        self.prepare.setVisible(bool(self.issues) and not self.candidates)
+        self.prepare.setEnabled(not busy)
+        self.apply.setVisible(bool(self.candidates))
+        self.apply.setEnabled(not busy and self.candidate is not None)
+        self.locate.setEnabled(not busy and self.issue_list.currentRow() >= 0)
+        self.export_button.setEnabled(not busy and bool(self.report_path))
+        self.close_button.setText("取消任务" if busy else "关闭")
+        self._playback_state(self.player.playbackState())
+
+    def set_status(self, text):
+        self.status.setText(text)
+
+    def _toggle_details(self, shown):
+        self.details_toggle.setText("收起详情" if shown else "查看详情")
+        self.details.setVisible(shown)
+
+    def _refresh_details(self, *_):
+        row = self.issue_list.currentRow()
+        self.locate.setEnabled(not self.busy and row >= 0)
         text = []
-        if selected:
-            issue = self.issues[index]
-            text += ["云端反馈：", issue.explanation, "", "本地处理："]
+        if row >= 0:
+            issue = self.issues[row]
+            text.extend(("所选疑点", issue.explanation))
             diagnostics = [e["summary"] for e in self.result.events if e["stage"] == "repair"
                            and e.get("start_s") == issue.start_s and e.get("end_s") == issue.end_s]
-            text += diagnostics[-2:] or ["暂无局部重建记录。点击下方按钮可生成候选，不会再次上传音频。"]
-        else:
-            text.append("没有可定位的疑点。")
-        for event in self.result.events:
-            if event["stage"] in ("compare", "error", "manual"):
-                text.extend(("", event.get("summary", "")))
-        self.issue_detail.setPlainText("\n".join(text))
+            text.extend(diagnostics[-1:])
+        if self.candidate:
+            text.extend(("", "候选改动", *note_changes(self.current, self.candidate.notes)))
+        summaries = [e.get("summary", "") for e in self.result.events
+                     if e["stage"] in ("compare", "error", "manual")]
+        text.extend(("", *summaries))
+        self.issue_detail.setPlainText("\n".join(text).strip() or "没有可定位的疑点。")
 
-    def refresh_candidate(self, *_):
-        index = self.candidate_list.currentIndex()
-        candidate = self.result.candidates[index] if 0 <= index < len(self.result.candidates) else None
-        valid = candidate is not None and candidate.baseline_fingerprint == fingerprint(self.current)
-        self.preview.setEnabled(valid)
-        self.apply.setEnabled(valid)
-        if candidate is None:
-            self.changes.setPlainText("尚无候选修改。请先重建疑点片段；也可以直接定位音符手动编辑。")
-        elif not valid:
-            self.changes.setPlainText("此候选对应旧版乐谱，请重新生成。")
+    def _candidate_changed(self, *_):
+        self._clear_audio()
+        if self.candidate:
+            count = len(note_changes(self.current, self.candidate.notes))
+            self.set_status(f"{count} 处音符变化 · 应用后可用 Ctrl+Z 撤销")
+        elif self.issues:
+            self.set_status("可在本地根据疑点生成候选。" if self.result.status != "manual"
+                            else "可按原疑点检查剩余片段。")
         else:
-            self.changes.setPlainText("应用后简谱与演奏一起更新，可用 Ctrl+Z 撤销；这不代表云端复核通过。\n\n" +
-                                      "\n".join(note_changes(self.current, candidate.notes)))
+            self.set_status("")
+        self._refresh_details()
 
-    def choose(self, kind, selected=False):
-        issues = self.issues
-        if selected:
-            index = self.issue_list.currentRow()
-            if not 0 <= index < len(issues):
-                return
-            issues = (issues[index],)
-        candidate = None
-        if kind in ("apply", "preview"):
-            index = self.candidate_list.currentIndex()
-            if not 0 <= index < len(self.result.candidates):
-                return
-            candidate = self.result.candidates[index]
-            if candidate.baseline_fingerprint != fingerprint(self.current):
-                return
-        self.action = ReviewAction(kind, issues, candidate)
-        self.accept()
+    def _locate(self):
+        row = self.issue_list.currentRow()
+        if not self.busy and row >= 0:
+            self.locate_requested.emit(self.issues[row])
+
+    def _apply(self):
+        if not self.busy and self.candidate:
+            self.apply_requested.emit(self.candidate)
+
+    def _choose_track(self, index):
+        if self.busy or self.candidate is None:
+            return
+        if not self.paths:
+            self.track_buttons[index].setChecked(False)
+            self.audition_requested.emit(self.candidate, index)
+            return
+        source = QUrl.fromLocalFile(str(self.paths[index]))
+        self.resume_position = self.player.position()
+        if self.resume_position >= self.timeline.maximum() - 50:
+            self.resume_position = 0
+        if self.player.source() != source:
+            self.player.setSource(source)
+        else:
+            self.player.setPosition(self.resume_position)
+        for i, button in enumerate(self.track_buttons):
+            button.setChecked(i == index)
+        self.player.play()
+        self.set_status(f"试听{self.track_buttons[index].text()} · {self.first:.2f}–{self.last:.2f} 秒")
+
+    def play_audition(self, value, index):
+        self.paths, self.first, self.last = value
+        self.timeline.setRange(0, round((self.last - self.first) * 1000))
+        self._choose_track(index)
+
+    def _clear_audio(self):
+        self.paths = ()
+        self.player.stop()
+        self.player.setSource(QUrl())
+        self.timeline.setRange(0, 0)
+        self.timeline.setEnabled(False)
+        for button in self.track_buttons:
+            button.setChecked(False)
+
+    def _loaded(self, status):
+        if status == QMediaPlayer.MediaStatus.LoadedMedia:
+            self.player.setPosition(self.resume_position)
+            self.timeline.setEnabled(True)
+
+    def _position_changed(self, milliseconds):
+        if not self.timeline.isSliderDown():
+            self.timeline.setValue(milliseconds)
+
+    def _playback_state(self, state):
+        self.stop.setEnabled(not self.busy and state != QMediaPlayer.PlaybackState.StoppedState)
+
+    def _playback_error(self, *_):
+        self._clear_audio()
+        self.set_status("试听失败，可重新选择音轨重试。")
+
+    def reject(self):
+        if self.busy:
+            self.cancel_requested.emit()
+        else:
+            super().reject()
+
+    def done(self, code):
+        self._clear_audio()
+        super().done(code)
 
     def export(self):
         selected, _ = QFileDialog.getSaveFileName(self, "导出复核记录", "音频复核.json", "JSON (*.json)")
@@ -162,76 +297,4 @@ class ReviewReportDialog(QDialog):
             try:
                 Path(selected).write_bytes(Path(self.report_path).read_bytes())
             except OSError:
-                self.error.setText("无法保存复核记录，请选择可写入的位置。")
-
-
-class CandidateAuditionDialog(QDialog):
-    def __init__(self, parent, paths, first, last):
-        super().__init__(parent)
-        self.paths = paths
-        self.setWindowTitle("局部修改对照试听")
-        self.resize(580, 225)
-        layout = QVBoxLayout(self)
-        label = QLabel(f"试听原曲 {first:.2f}–{last:.2f} 秒\n三个音轨使用相同起止时间。切换时保留位置；关闭窗口不会改谱。")
-        label.setWordWrap(True)
-        layout.addWidget(label)
-        self.output = QAudioOutput(self)
-        self.output.setVolume(.65)
-        self.player = QMediaPlayer(self)
-        self.player.setAudioOutput(self.output)
-        tracks = QHBoxLayout()
-        self.track_buttons = []
-        for index, name in enumerate(("原曲", "修改前", "候选")):
-            button = QPushButton(name)
-            button.setCheckable(True)
-            button.setMinimumHeight(36)
-            button.clicked.connect(lambda _=False, i=index: self.play_track(i))
-            self.track_buttons.append(button)
-            tracks.addWidget(button)
-        stop = QPushButton("停止")
-        stop.clicked.connect(self.player.stop)
-        tracks.addWidget(stop)
-        layout.addLayout(tracks)
-        self.timeline = QSlider(Qt.Orientation.Horizontal)
-        self.timeline.setAccessibleName("候选对照播放进度")
-        self.timeline.setRange(0, round((last - first) * 1000))
-        self.timeline.sliderReleased.connect(lambda: self.player.setPosition(self.timeline.value()))
-        layout.addWidget(self.timeline)
-        self.status = QLabel("请选择音轨开始试听。")
-        self.status.setTextFormat(Qt.TextFormat.PlainText)
-        layout.addWidget(self.status)
-        self.player.positionChanged.connect(lambda ms: self.timeline.setValue(ms) if not self.timeline.isSliderDown() else None)
-        self.player.errorOccurred.connect(lambda *_: self.status.setText("播放失败，请检查系统音频输出；未改动乐谱。"))
-        self.resume_position = 0
-        self.player.mediaStatusChanged.connect(self.loaded)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.button(QDialogButtonBox.StandardButton.Close).setText("返回结果")
-        apply = buttons.addButton("应用候选到简谱", QDialogButtonBox.ButtonRole.AcceptRole)
-        apply.setObjectName("primary")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def play_track(self, index):
-        self.resume_position = self.player.position()
-        if self.resume_position >= self.timeline.maximum() - 50:
-            self.resume_position = 0
-        self.player.stop()
-        for i, button in enumerate(self.track_buttons):
-            button.setChecked(i == index)
-        self.status.setText(f"正在试听{self.track_buttons[index].text()}；乐谱尚未改动。")
-        source = QUrl.fromLocalFile(str(self.paths[index]))
-        if self.player.source() == source:
-            self.player.setPosition(self.resume_position)
-        else:
-            self.player.setSource(source)
-        self.player.play()
-
-    def loaded(self, status):
-        if status == QMediaPlayer.MediaStatus.LoadedMedia:
-            self.player.setPosition(self.resume_position)
-
-    def done(self, code):
-        self.player.stop()
-        self.player.setSource(QUrl())
-        super().done(code)
+                self.set_status("无法保存复核记录，请选择可写入的位置。")
