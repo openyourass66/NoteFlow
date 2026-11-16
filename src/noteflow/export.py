@@ -9,12 +9,14 @@ import mido
 from .score import BAR, KEYS, PPQ, Score, to_text
 
 AUTO_INSTRUMENT = "自动"
+GUZHENG_PROGRAM = 107
 PROGRAMS = {
     "钢琴": 0, "电钢琴": 4, "羽管键琴": 6, "钟琴": 9, "颤音琴": 11, "马林巴": 12,
     "木琴": 13, "风琴": 19, "手风琴": 21, "尼龙吉他": 24, "钢弦吉他": 25,
     "清音电吉他": 27, "原声贝斯": 32, "电贝斯": 33, "小提琴": 40, "中提琴": 41,
     "大提琴": 42, "竖琴": 46, "弦乐合奏": 48, "人声哼唱": 53, "小号": 56,
     "长号": 57, "圆号": 60, "中音萨克斯": 65, "双簧管": 68, "单簧管": 71, "长笛": 73,
+    "古筝": GUZHENG_PROGRAM,
 }
 PROGRAM_NAMES = {program: name for name, program in PROGRAMS.items()}
 

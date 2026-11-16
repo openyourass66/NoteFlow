@@ -13,8 +13,9 @@ Windows 目录包基于 `poc/requirements-win-x64.lock` 中的依赖构建。以
 | NumPy、SciPy、Numba、llvmlite | 1.26.4、1.17.1、0.68.1、0.50.0 | [NumPy](https://github.com/numpy/numpy/blob/main/LICENSE.txt)、[SciPy](https://github.com/scipy/scipy/blob/main/LICENSE.txt)、[Numba](https://github.com/numba/numba/blob/main/LICENSE)、[llvmlite](https://github.com/numba/llvmlite/blob/main/LICENSE) |
 | SoundFile、libsndfile | 0.14.0、1.2.2 | [SoundFile 及捆绑 libsndfile](https://github.com/bastibe/python-soundfile#license) |
 | PyInstaller | 6.22.3 | [引导程序许可与分发例外](https://pyinstaller.org/en/stable/license.html) |
+| 内置古筝 SoundFont | 15 个拨弦录音采样 | [Pufermufin 的古筝录音](https://freesound.org/people/Pufermufin/sounds/396868/) 与 [XSXB-Band-Samples 的分音采样](https://github.com/sparklecatta-lang/XSXB-Band-Samples/tree/4ce222ecff5f6f1e38470b1e8b22eb31b1a3a040)，均为 [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) |
 
-开发机验证使用 FFmpeg 和 ffprobe 9.0.2（Gyan Essentials）、FluidSynth 2.6.2 和 GeneralUser GS 2.0.3。目录包通过路径调用外部工具和音源，这些文件由使用者单独准备。来源、构建选项及哈希见 [M0 记录](../poc/results.md)。
+开发机验证使用 FFmpeg 和 ffprobe 9.0.2（Gyan Essentials）、FluidSynth 2.6.2 和 GeneralUser GS 2.0.3。目录包通过路径调用外部工具和通用 GM 音源。来源、构建选项及哈希见 [M0 记录](../poc/results.md)。古筝音源随包分发，使用上游 `guzheng.sfz` 中每个采样音高的 `v1-rr1` 拨弦。保留键位区间，依据实测修正 D2 和 G5 的调音，转换为单声道 16 位 PCM，统一峰值并淡出尾部。
 
 此清单记录本地开发构建。公开分发前需根据实际目录包逐项核对 Qt 模块、原生库、模型资产、许可证文本和对应源码获取方式。
 

@@ -4,6 +4,7 @@ from threading import Event
 
 import pytest
 
+from noteflow.export import GUZHENG_PROGRAM
 from noteflow.instruments import choose_program
 from noteflow.media import probe
 from noteflow.notes import NoteEvent
@@ -22,7 +23,7 @@ def tools():
     return tools
 
 
-@pytest.mark.parametrize("program", [24, 40, 65])
+@pytest.mark.parametrize("program", [24, 40, 65, GUZHENG_PROGRAM])
 def test_matches_reference_timbre_using_original_audio(tools, tmp_path, program):
     soundfont = Path(tools.soundfont)
     score = build_score(tuple(
@@ -30,7 +31,8 @@ def test_matches_reference_timbre_using_original_audio(tools, tmp_path, program)
         for i, pitch in enumerate((62, 64, 69, 65, 72, 67, 64, 74))
     ), ScoreSettings())
     audio = tmp_path / "original.wav"
-    render_preview(score, program, soundfont, audio, tools.fluidsynth, Event())
+    playback_font = tmp_path / "unused.sf2" if program == GUZHENG_PROGRAM else soundfont
+    render_preview(score, program, playback_font, audio, tools.fluidsynth, Event())
     media = probe(audio, tools.ffprobe)
     assert choose_program(media, score.melody, soundfont, tools.ffmpeg, tools.fluidsynth,
                           tmp_path, Event()) == (program, True)

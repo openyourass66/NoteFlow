@@ -14,6 +14,7 @@ __pycache__/
 
 # 本地音源、媒体、项目和导出产物
 *.sf2
+!/src/noteflow/soundfonts/guzheng.sf2
 *.wav
 *.mp3
 *.mp4

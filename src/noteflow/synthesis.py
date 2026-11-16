@@ -7,9 +7,11 @@ from tempfile import TemporaryDirectory
 from threading import Event
 
 from .errors import NoteFlowError
-from .export import write_midi
+from .export import GUZHENG_PROGRAM, write_midi
 from .process import check_cancelled, run_tool
 from .score import Score
+
+GUZHENG_SOUNDFONT = Path(__file__).with_name("soundfonts") / "guzheng.sf2"
 
 
 def _chunks(stream, end):
@@ -47,11 +49,15 @@ def render_preview(
     cancel: Event, *, original_timing: bool = True,
 ) -> Path:
     check_cancelled(cancel)
+    if program == GUZHENG_PROGRAM:
+        soundfont = GUZHENG_SOUNDFONT
     try:
         available = program in soundfont_programs(soundfont)
     except (OSError, ValueError, struct.error):
         available = False
     if not available:
+        if program == GUZHENG_PROGRAM:
+            raise NoteFlowError("SYNTH_FAILED", "render", "无法读取内置古筝音源，请检查程序目录是否完整。")
         raise NoteFlowError("SYNTH_FAILED", "render", "音源缺失或没有此乐器预设，请在工具设置中选择 GM SoundFont。")
 
     try:

@@ -9,10 +9,10 @@ import mido
 import numpy as np
 
 from .errors import NoteFlowError
-from .export import PROGRAMS
+from .export import GUZHENG_PROGRAM, PROGRAMS
 from .media import SAMPLE_RATE, normalize
 from .process import check_cancelled, run_tool
-from .synthesis import soundfont_programs
+from .synthesis import GUZHENG_SOUNDFONT, soundfont_programs
 
 _TEMPLATE_STEP_MS = 300
 _TEMPLATE_NOTE_MS = 250
@@ -81,9 +81,13 @@ def _render_templates(directory, soundfont, fluidsynth, programs, pitches, cance
             track.append(mido.Message("control_change", control=120, value=0, time=_TEMPLATE_STEP_MS - _TEMPLATE_NOTE_MS))
     source, target = directory / "presets.mid", directory / "presets.wav"
     midi.save(source)
+    soundfonts = [str(soundfont)]
+    if GUZHENG_PROGRAM in programs:
+        # FluidSynth uses the last loaded preset when both banks contain program 107.
+        soundfonts.append(str(GUZHENG_SOUNDFONT))
     run_tool(fluidsynth, "render", 30, (
         "-ni", "-R", "0", "-C", "0", "-r", str(SAMPLE_RATE), "-T", "wav",
-        "-F", str(target), str(soundfont), str(source),
+        "-F", str(target), *soundfonts, str(source),
     ), cancel)
     return _read_pcm(target), offsets
 
@@ -126,8 +130,14 @@ def choose_program(media, notes, soundfont: Path, ffmpeg, fluidsynth, workdir, c
         available = soundfont_programs(soundfont)
     except (OSError, ValueError, struct.error):
         return 0, False
-    programs = tuple(program for program in PROGRAMS.values() if program in available)
-    fallback = next(iter(programs), min(available, default=0))
+    programs = tuple(program for program in PROGRAMS.values()
+                     if program in available and program != GUZHENG_PROGRAM)
+    fallback = next(iter(programs), min(available - {GUZHENG_PROGRAM}, default=0))
+    try:
+        if GUZHENG_PROGRAM in soundfont_programs(GUZHENG_SOUNDFONT):
+            programs += (GUZHENG_PROGRAM,)
+    except (OSError, ValueError, struct.error):
+        pass
     notes = _sample_notes(notes)
     if len(programs) < 2 or len(notes) < 2:
         return fallback, False

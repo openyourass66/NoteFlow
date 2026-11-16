@@ -25,7 +25,7 @@ from .pipeline import run_pipeline
 from .desktop_settings import Tools, edit_tools, load_tools
 from .desktop_ui import build_interface, set_transport_paused
 from .errors import NoteFlowError
-from .export import AUTO_INSTRUMENT, PROGRAM_NAMES, PROGRAMS, export_score
+from .export import AUTO_INSTRUMENT, GUZHENG_PROGRAM, PROGRAM_NAMES, PROGRAMS, export_score
 from .instruments import choose_program
 from .media import MEDIA_SUFFIXES, MediaInfo, decode_original, probe
 from .process import Cancelled, check_cancelled
@@ -644,7 +644,7 @@ class MainWindow(QMainWindow):
         if self.score is None or self._thread is not None:
             return
         self._stop_player()
-        if not self.tools.soundfont:
+        if not self.tools.soundfont and PROGRAMS.get(self.instrument.currentText()) != GUZHENG_PROGRAM:
             self._status("请在工具设置中选择包含所需乐器的 SF2 音源。")
             self._sync_controls()
             return

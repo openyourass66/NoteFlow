@@ -20,6 +20,9 @@ dependencies = [
 desktop = ["PySide6==6.12.0"]
 test = ["pytest>=8"]
 
+[tool.setuptools.package-data]
+noteflow = ["soundfonts/guzheng.sf2", "soundfonts/guzheng-CC0.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
