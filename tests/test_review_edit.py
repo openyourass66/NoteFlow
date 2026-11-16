@@ -6,7 +6,7 @@ import pytest
 from noteflow.notes import NoteEvent
 from noteflow.review import (RepairCandidate, RepairPlan, ReviewIssue, ReviewLimits,
                              Verdict, fingerprint, run_review, save_report)
-from noteflow.review_edit import apply_manual, candidate_notes, latest_issues, load_report, write_report
+from noteflow.review_edit import apply_manual, candidate_notes, latest_issues, load_report
 
 
 BASE = (NoteEvent("lead", .1, 1, 62, .7, 80), NoteEvent("later", 1.2, 1.8, 64, .8, 80))
@@ -53,15 +53,15 @@ def test_manual_apply_rejects_stale_or_out_of_region_edits():
 
 @pytest.mark.parametrize("version", [1, 2])
 def test_import_old_and_new_feedback_regenerates_candidates_and_keeps_usage(tmp_path, version):
-    source, destination = tmp_path / "saved.json", tmp_path / "session/report.json"
-    save_report(rejected_result(), source, model="audio-model", usage={"total_tokens": 100})
+    source, destination = tmp_path / "saved.json", tmp_path / "exported.json"
+    save_report(replace(rejected_result(), model="audio-model", usage={"total_tokens": 100}), source)
     data = json.loads(source.read_text(encoding="utf-8"))
     data["version"] = version
     data["candidates"] = [{"notes": [{"midi": 100}]}]
     source.write_text(json.dumps(data), encoding="utf-8")
     result = load_report(source, BASE, 2)
     assert latest_issues(result) == (ISSUE,) and not result.candidates
-    write_report(result, destination, previous=source)
+    save_report(result, destination)
     copied = json.loads(destination.read_text(encoding="utf-8"))
     assert copied["model"] == "audio-model" and copied["usage"]["total_tokens"] == 100
     assert "candidates" in json.loads(source.read_text(encoding="utf-8"))
@@ -94,35 +94,3 @@ def test_report_import_tolerates_sample_rate_rounding_at_media_end(tmp_path):
     save_report(replace(result, end_s=2.00002, events=(assessment,)), path)
     loaded = load_report(path, BASE, 2)
     assert loaded.end_s == 2 and latest_issues(loaded)[0].end_s == 2
-
-
-def test_cache_restores_recent_candidates_and_expires_old_files(tmp_path):
-    import os
-    from time import time
-    from noteflow.analysis import AnalysisResult
-    from noteflow.media import MediaInfo
-    from noteflow.review_cache import REVIEW_CACHE_SECONDS, is_recent, remember_report, remove_expired_reports, report_location
-
-    source = tmp_path / "song.wav"
-    source.write_bytes(b"audio")
-    analysis = AnalysisResult(MediaInfo(source, 0, "pcm_s16le", "wav", 2), 2, BASE)
-    directory = tmp_path / "review-records"
-    destination = report_location(directory, source, analysis)
-    assert destination is not None
-    report = tmp_path / "report.json"
-    save_report(rejected_result(), report)
-    remember_report(report, destination)
-    assert is_recent(destination)
-    restored = load_report(destination, FIXED, 2, cached=True)
-    assert restored.notes == BASE and restored.candidates == (CANDIDATE,)
-    data = json.loads(destination.read_text(encoding="utf-8"))
-    data["candidates"][0]["notes"][1]["midi"] = 99
-    destination.write_text(json.dumps(data), encoding="utf-8")
-    assert not load_report(destination, BASE, 2, cached=True).candidates
-    source.write_bytes(b"different audio at the same path")
-    assert report_location(directory, source, analysis) != destination
-    past = time() - REVIEW_CACHE_SECONDS - 1
-    os.utime(destination, (past, past))
-    assert not is_recent(destination)
-    remove_expired_reports(directory)
-    assert not destination.exists()

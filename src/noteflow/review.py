@@ -3,8 +3,9 @@
 import hashlib
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from .errors import NoteFlowError
 from .notes import NoteEvent
@@ -69,6 +70,8 @@ class ReviewResult:
     start_s: float
     end_s: float
     candidates: tuple[RepairCandidate, ...] = ()
+    model: str = ""
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 STATUS_TEXT = {
@@ -248,7 +251,8 @@ def run_review(notes, duration, reviewer, repair, *, start_s=0.0, end_s=None,
             check_cancelled(cancel)
             best, accepted = candidate, accepted + 1
             events.append({"round": rounds, "stage": "accepted", "fingerprint": signature})
-            result("round_limit")  # Durable checkpoint of an accepted version, not a pass.
+            if checkpoint:
+                result("round_limit")
         return result("round_limit")
     except _CallLimit:
         return result("call_limit")
@@ -261,8 +265,16 @@ def run_review(notes, duration, reviewer, repair, *, start_s=0.0, end_s=None,
         return result("error")
 
 
-def save_report(result: ReviewResult, destination: Path, *, model="", usage=None):
-    payload = {"version": 2, "model": model, "accuracy": None, "usage": usage or {}, **asdict(result)}
-    temporary = destination.with_suffix(".tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
-    temporary.replace(destination)
+def save_report(result: ReviewResult, destination: Path):
+    """Write an explicitly exported review record."""
+    payload = {"version": 2, "accuracy": None, **asdict(result)}
+    temporary = None
+    try:
+        with NamedTemporaryFile(dir=destination.parent, mode="w", encoding="utf-8",
+                                suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
+        temporary.replace(destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)

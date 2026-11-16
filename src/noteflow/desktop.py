@@ -34,8 +34,7 @@ from .score import Score, ScoreSettings, build_score, rekey
 from .separation import Stems, separate
 from .synthesis import render_preview
 from .review import STATUS_TEXT
-from .review_cache import is_recent, remember_report, remove_expired_reports, report_location
-from .review_edit import apply_manual, load_report, write_report
+from .review_edit import apply_manual, load_report
 from .review_service import prepare_audition, prepare_repairs, review_score
 from .review_results_ui import ReviewReportDialog
 from .review_ui import ReviewDialog, show_calibration
@@ -115,11 +114,8 @@ class MainWindow(QMainWindow):
         self._undo, self._redo = [], []
         self._analysis_vocals = False
         self._review_key = ""
-        self._review_result = self._review_report_path = None
+        self._review_result = None
         self._review_dialog = None
-        self._review_cache_dir = cache / "review-records"
-        self._review_cache_path = None
-        remove_expired_reports(self._review_cache_dir)
         self._revision = 0
         self._thread = self._worker = self._cancel = self._callback = None
         self._pending_source = None
@@ -296,7 +292,8 @@ class MainWindow(QMainWindow):
         folder = self.workdir / f"review-{uuid4().hex}"
         if request.calibration:
             def calibrate(cancel, progress):
-                return check_reviewer(tools, request.config, folder, send=True, cancel=cancel, progress=progress)
+                return check_reviewer(tools, request.config, folder, send=True, retain_artifacts=False,
+                                      cancel=cancel, progress=progress)
             def calibrated(report):
                 label = {"passed": "通过", "failed": "未通过", "cancelled": "已取消", "error": "出错"}.get(report["status"], "未完成")
                 self._status(f"复核能力检查结束，共请求 {report['calls']} 次；结果：{label}。")
@@ -318,15 +315,12 @@ class MainWindow(QMainWindow):
                                STATUS_TEXT[result.status])
                 self._status(f"{failure} 已保留上次复核记录。")
                 return
-            self._review_result, self._review_report_path = result, folder / "report.json"
+            self._review_result = result
             if result.notes != score.melody:
                 self._apply_notes(result.notes)
             self._status(f"{STATUS_TEXT[result.status]}；请求 {result.calls} 次，采用 {result.accepted} 轮修改。")
-            saved = not has_feedback or self._cache_review()
             self._sync_controls()
             self.show_review_report()
-            if not saved:
-                self._status("复核记录暂存在本次会话，可从详情导出。")
 
         self._start("正在准备音频复核…", operation, finished, keep_cancelled=True)
 
@@ -336,7 +330,7 @@ class MainWindow(QMainWindow):
             return
         self._stop_player()
         self._sync_controls()
-        dialog = ReviewReportDialog(self, self._review_result, self._review_report_path, self.score.melody)
+        dialog = ReviewReportDialog(self, self._review_result, self.score.melody)
         self._review_dialog = dialog
         dialog.output.setVolume(self._audio.volume())
         dialog.prepare_requested.connect(self._prepare_review_candidates)
@@ -378,63 +372,12 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         try:
-            result = load_report(Path(selected), self.score.melody, self.analysis.duration_s)
-            path = self.workdir / f"review-{uuid4().hex}" / "report.json"
-            write_report(result, path, previous=selected)
-        except (ValueError, OSError) as error:
-            self._status(str(error) if isinstance(error, ValueError) else "无法保存导入的复核记录。")
+            self._review_result = load_report(Path(selected), self.score.melody, self.analysis.duration_s)
+        except ValueError as error:
+            self._status(str(error))
             return
-        self._review_result, self._review_report_path = result, path
-        saved = self._cache_review()
         self._sync_controls()
         self.show_review_report()
-        if not saved:
-            self._status("导入的复核记录暂存在本次会话。")
-
-    def _review_location(self):
-        if self.score is None or self.analysis is None:
-            return None
-        return report_location(self._review_cache_dir, self.project_path or self.media.path,
-                               self.analysis, project=self.project_path is not None)
-
-    def _cache_review(self):
-        if self._review_cache_path is not None and self._review_report_path is not None:
-            try:
-                remember_report(self._review_report_path, self._review_cache_path)
-                return True
-            except OSError:
-                LOG.warning("无法保存本地音频复核缓存")
-        return False
-
-    def _restore_review(self):
-        path = self._review_location()
-        if path == self._review_cache_path:
-            return False
-        self._review_cache_path = path
-        self._review_result = self._review_report_path = None
-        if not is_recent(path):
-            return False
-        report = self.workdir / f"review-{uuid4().hex}" / "report.json"
-        try:
-            remember_report(path, report)
-            result = load_report(report, self.score.melody, self.analysis.duration_s, cached=True)
-        except (ValueError, OSError):
-            LOG.warning("无法恢复本地音频复核缓存")
-            return False
-        self._review_result, self._review_report_path = result, report
-        return True
-
-    def _store_review_result(self, result):
-        path = self._review_report_path or self.workdir / f"review-{uuid4().hex}" / "report.json"
-        try:
-            write_report(result, path, previous=self._review_report_path)
-        except (ValueError, OSError):
-            self._status("无法保存复核记录，本次操作未应用，请检查磁盘可用空间。")
-            return False
-        self._review_result, self._review_report_path = result, path
-        self._cache_review()
-        self._sync_controls()
-        return True
 
     def _prepare_review_candidates(self):
         dialog = self._review_dialog
@@ -451,10 +394,10 @@ class MainWindow(QMainWindow):
             events = tuple({"round": result.rounds, "stage": "repair", **item} for item in plan.diagnostics)
             updated = replace(result, notes=score.melody, candidates=plan.candidates,
                               status="candidates" if plan.candidates else "unsupported", events=(*result.events, *events))
-            if self._store_review_result(updated):
-                dialog.set_result(updated, self._review_report_path)
-                if not plan.candidates:
-                    self._status("未找到有音频证据的候选，可在详情中定位音符。")
+            self._review_result = updated
+            dialog.set_result(updated)
+            if not plan.candidates:
+                self._status("未找到有音频证据的候选，可在详情中定位音符。")
         dialog.set_busy(True)
         self._start("正在重建复核疑点片段…", operation, finished)
 
@@ -475,11 +418,11 @@ class MainWindow(QMainWindow):
         except ValueError as error:
             self._status(str(error))
             return
-        if self._store_review_result(updated):
-            self._apply_notes(updated.notes)
-            if self._review_dialog is not None:
-                self._review_dialog.accept()
-            self._status("候选已应用：简谱与演奏已更新，可用 Ctrl+Z 撤销；尚未重新通过云端复核。")
+        self._apply_notes(updated.notes)
+        self._review_result = updated
+        if self._review_dialog is not None:
+            self._review_dialog.accept()
+        self._status("候选已应用，可用 Ctrl+Z 撤销。")
 
     def choose_source(self):
         patterns = " ".join(f"*{suffix}" for suffix in MEDIA_SUFFIXES)
@@ -560,6 +503,7 @@ class MainWindow(QMainWindow):
         self._start("正在生成简谱…", generate, self._generated)
 
     def _generated(self, result: GeneratedScore):
+        self._review_result = None
         self.analysis = result.analysis
         if result.stems is not None:
             self.stems = result.stems
@@ -572,8 +516,6 @@ class MainWindow(QMainWindow):
         self._show_media(self.analysis.duration_s)
         self._publish_score(result.score, calibrated=self.analysis.beat.reliable, notice=result.notice,
                             overlap=result.overlap_fraction)
-        if self._restore_review():
-            self._status(f"{self.status.text()} 可继续查看上次音频复核。")
         self._mark_dirty()
 
     def _publish_score(self, score, *, calibrated=True, notice="", overlap=None):
@@ -807,8 +749,7 @@ class MainWindow(QMainWindow):
             self._project_workspace.cleanup()
             self._project_workspace = None
         self.media = self.analysis = self.score = self.project_path = None
-        self._review_result = self._review_report_path = None
-        self._review_cache_path = None
+        self._review_result = None
         self._edited_notes = None
         self._undo.clear()
         self._redo.clear()
@@ -886,10 +827,7 @@ class MainWindow(QMainWindow):
             self._show_media(self.media.duration_s)
             self._update_title()
             self._remember_project(path)
-            if self._restore_review():
-                self._status("项目已恢复，可继续查看上次音频复核。")
-            else:
-                self._status("项目已恢复，可以继续编辑和试听。")
+            self._status("项目已恢复，可以继续编辑和试听。")
 
         self._start("正在打开项目…", lambda cancel, _: load_project(path, directory, cancel), loaded)
 
@@ -915,8 +853,6 @@ class MainWindow(QMainWindow):
 
         def saved(_):
             self.project_path = path.resolve()
-            self._review_cache_path = self._review_location()
-            self._cache_review()
             self._dirty = False
             self._update_title()
             self._remember_project(path)
@@ -1138,7 +1074,7 @@ class MainWindow(QMainWindow):
             "4. 演奏保留原始节奏，排谱校准不改变声音；点击音符可定位。\n"
             "5. Ctrl+S 保存项目。项目包含原曲、分轨和音符，可离线恢复。\n"
             "6. 音频复核结果中可直接对照试听，并应用候选到简谱。「查看详情」可定位音符。\n"
-            "7. 上次复核结果在本机保留 7 天。再次点音频复核可继续查看，长期留存可导出记录。\n\n"
+            "7. 复核结果保留到本次使用结束。关闭结果窗口后，再次点音频复核即可继续。\n\n"
             "当前支持固定 4/4 拍、恒定速度和最长 120 秒片段。")
 
     def closeEvent(self, event):
@@ -1161,6 +1097,7 @@ class MainWindow(QMainWindow):
             self._project_workspace.cleanup()
         self.settings.setValue("window/geometry", self.saveGeometry())
         self.settings.setValue("playback/volume", self.volume.value())
+        self._review_result = None
         self.workspace.cleanup()
         event.accept()
 

@@ -59,7 +59,7 @@ def test_review_service_uses_rendered_audio_local_repair_and_complete_final_revi
     from pathlib import Path
     from noteflow import review_qwen
     from noteflow.analysis import AnalysisResult
-    from noteflow.review import ReviewLimits
+    from noteflow.review import ReviewLimits, save_report
     from noteflow.review_qwen import QwenConfig
     from noteflow.review_service import review_score
     from noteflow.score import build_score
@@ -85,7 +85,10 @@ def test_review_service_uses_rendered_audio_local_repair_and_complete_final_revi
                           tmp_path / "session", limits=ReviewLimits(), start_s=0, end_s=8)
     assert result.status == "passed" and result.notes[3].midi == clean[3].midi
     assert calls == [17, 26, 26, 17]
-    report = json.loads((tmp_path / "session/report.json").read_text(encoding="utf-8"))
+    assert not list((tmp_path / "session").rglob("*.json"))
+    destination = tmp_path / "exported.json"
+    save_report(result, destination)
+    report = json.loads(destination.read_text(encoding="utf-8"))
     assert report["usage"]["total_tokens"] == 400 and report["accuracy"] is None
 
 

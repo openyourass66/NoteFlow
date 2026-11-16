@@ -39,7 +39,7 @@ def prepare_cases(folder):
     return MediaInfo(source, 0, "pcm_s16le", "wav", 8), notes, pitch, octave, fragmented
 
 
-def check_reviewer(tools, config, folder, *, send=False, cancel=None, progress=None):
+def check_reviewer(tools, config, folder, *, send=False, retain_artifacts=True, cancel=None, progress=None):
     """Six explicit requests; correctness here is not real-music accuracy."""
     folder = Path(folder)
     media, clean, pitch, octave, fragmented = prepare_cases(folder)
@@ -50,12 +50,14 @@ def check_reviewer(tools, config, folder, *, send=False, cancel=None, progress=N
     destination = folder / "calibration.json"
 
     def save():
-        destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        if retain_artifacts:
+            destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     audio = ReviewAudio(media, ScoreSettings(), tools, folder / "listening", cancel)
-    for name, notes in (("clean", clean), ("pitch", pitch), ("octave", octave), ("fragmented", fragmented)):
-        bundle, _ = audio.bundle([("A", notes)], 0, 8)
-        (folder / f"{name}-comparison.wav").write_bytes(bundle)
+    if retain_artifacts:
+        for name, notes in (("clean", clean), ("pitch", pitch), ("octave", octave), ("fragmented", fragmented)):
+            bundle, _ = audio.bundle([("A", notes)], 0, 8)
+            (folder / f"{name}-comparison.wav").write_bytes(bundle)
     save()
     if not send:
         return report

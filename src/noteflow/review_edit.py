@@ -6,8 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .notes import NoteEvent
-from .review import (KINDS, STATUS_TEXT, RepairCandidate, ReviewIssue, ReviewResult,
-                     fingerprint, save_report, validate_notes)
+from .review import KINDS, STATUS_TEXT, ReviewIssue, ReviewResult, fingerprint, validate_notes
 
 
 def latest_issues(result):
@@ -58,23 +57,10 @@ def apply_manual(result, candidate, current, duration):
     return replace(result, notes=notes, status="manual", candidates=(), events=(*result.events, event))
 
 
-def write_report(result, path, *, previous=None):
-    """Keep provider usage when updating a report after a local action."""
-    metadata = {}
-    if previous and Path(previous).is_file():
-        metadata = json.loads(Path(previous).read_text(encoding="utf-8-sig"))
-    model = metadata.get("model", "")
-    usage = metadata.get("usage", {})
-    if not isinstance(model, str) or not isinstance(usage, dict):
-        raise ValueError("复核记录元数据无效。")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    save_report(result, path, model=model, usage=usage)
-
-
-def load_report(path: Path, current, duration, *, cached=False):
+def load_report(path: Path, current, duration):
     """Import existing feedback without sending the user's music again."""
     try:
-        if path.stat().st_size > (64_000_000 if cached else 8_000_000):
+        if path.stat().st_size > 8_000_000:
             raise ValueError
         data = json.loads(path.read_text(encoding="utf-8-sig"))
         if data["version"] not in (1, 2) or data["status"] not in STATUS_TEXT:
@@ -86,7 +72,7 @@ def load_report(path: Path, current, duration, *, cached=False):
             validate_notes(parsed, duration + .001)
             return parsed
         original, current_report = notes(data["baseline"]), notes(data["notes"])
-        if not cached and fingerprint(current_report) != fingerprint(current):
+        if fingerprint(current_report) != fingerprint(current):
             raise ValueError("复核记录与当前音符不匹配，请打开对应项目后导入。")
         first, last = float(data["start_s"]), float(data["end_s"])
         # Saved projects can decode at another sample rate. A sub-millisecond
@@ -126,27 +112,13 @@ def load_report(path: Path, current, duration, *, cached=False):
                             or issue.kind not in KINDS or not isinstance(issue.explanation, str)
                             or len(issue.explanation) > 10000):
                         raise ValueError
-        candidates = []
-        # External imports only restore feedback. Locally cached candidates
-        # remain available after checking their original score and bounds.
-        values = data.get("candidates", [])
-        if cached and isinstance(values, list):
-            for value in values[:128]:
-                try:
-                    start, end = value["start_s"], value["end_s"]
-                    if not first <= start < min(end, last) or end > last + .001:
-                        continue
-                    candidate = RepairCandidate(notes(value["notes"]), value["baseline_fingerprint"],
-                                                start, min(end, last), value["title"])
-                    if not isinstance(candidate.title, str):
-                        continue
-                    candidate_notes(candidate, current_report, duration)
-                except (KeyError, TypeError, ValueError):
-                    continue
-                candidates.append(candidate)
-        restored_notes = current_report if cached else tuple(current)
-        return ReviewResult(original, restored_notes, data["status"], data["calls"], data["rounds"],
-                            data["accepted"], tuple(events), first, last, tuple(candidates))
+        model, usage = data.get("model", ""), data.get("usage", {})
+        if not isinstance(model, str) or not isinstance(usage, dict):
+            raise ValueError
+        usage = {key: value for key, value in usage.items() if type(value) is int and value >= 0}
+        # Rebuild imported candidates from the current recording.
+        return ReviewResult(original, tuple(current), data["status"], data["calls"], data["rounds"],
+                            data["accepted"], tuple(events), first, last, model=model, usage=usage)
     except (OSError, KeyError, TypeError, ValueError, AttributeError, RecursionError) as error:
         if isinstance(error, ValueError) and "不匹配" in str(error):
             raise

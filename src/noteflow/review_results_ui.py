@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from .desktop_theme import ComboBox
-from .review import STATUS_TEXT, fingerprint
+from .review import STATUS_TEXT, fingerprint, save_report
 from .review_edit import latest_issues, note_changes
 
 KIND_TEXT = {"pitch": "音高", "octave": "八度", "rhythm": "节奏", "fragmentation": "连贯性",
@@ -25,7 +25,7 @@ class ReviewReportDialog(QDialog):
     cancel_requested = Signal()
     restart_requested = Signal()
 
-    def __init__(self, parent, result, report_path, current_notes):
+    def __init__(self, parent, result, current_notes):
         super().__init__(parent)
         self.setWindowTitle("复核结果与乐谱修改")
         self.resize(650, 240)
@@ -148,11 +148,11 @@ class ReviewReportDialog(QDialog):
 
         self.issue_list.currentRowChanged.connect(self._refresh_details)
         self.candidate_list.currentIndexChanged.connect(self._candidate_changed)
-        self.set_result(result, report_path)
+        self.set_result(result)
         self.close_button.setFocus()
 
-    def set_result(self, result, report_path):
-        self.result, self.report_path = result, report_path
+    def set_result(self, result):
+        self.result = result
         self.issues = latest_issues(result)
         self.candidates = tuple(c for c in result.candidates if c.baseline_fingerprint == self.signature)
         stale = self.signature != fingerprint(result.notes)
@@ -188,7 +188,7 @@ class ReviewReportDialog(QDialog):
         self.apply.setEnabled(not busy and self.candidate is not None)
         self.locate.setEnabled(not busy and self.issue_list.currentRow() >= 0)
         self.restart.setEnabled(not busy and bool(self.current))
-        self.export_button.setEnabled(not busy and bool(self.report_path))
+        self.export_button.setEnabled(not busy)
         self.close_button.setText("取消任务" if busy else "关闭")
         self._playback_state(self.player.playbackState())
 
@@ -301,6 +301,6 @@ class ReviewReportDialog(QDialog):
         selected, _ = QFileDialog.getSaveFileName(self, "导出复核记录", "音频复核.json", "JSON (*.json)")
         if selected:
             try:
-                Path(selected).write_bytes(Path(self.report_path).read_bytes())
-            except OSError:
+                save_report(self.result, Path(selected))
+            except (OSError, ValueError):
                 self.set_status("无法保存复核记录，请选择可写入的位置。")

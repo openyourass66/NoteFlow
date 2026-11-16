@@ -70,9 +70,9 @@ $nfInference = '.\.tools\inference\Scripts\python.exe'
 
 Key 只在本次进程内保留，不写入设置、项目、日志或复核报告。也可在启动前设置 `DASHSCOPE_API_KEY`；服务地址和模型可用 `NOTEFLOW_REVIEW_BASE_URL`、`NOTEFLOW_REVIEW_MODEL` 预填。读取 `.env` 文件不会自动生效。普通导入、识别、播放始终使用本地流程。
 
-复核结果在本机保留 7 天。再次点「音频复核…」会直接打开上次结果。重新打开同一个项目也能恢复疑点和候选，想再次请求云端时用「重新复核…」。乐谱变动后可查看旧疑点，应用候选前需按当前乐谱重新生成。
+当前乐谱的复核结果保存在内存中。关闭结果窗口后，再次点「音频复核…」会打开上次的疑点和候选。想再次请求云端时用「重新复核…」。退出软件或切换项目时清空结果。乐谱变动后可查看旧疑点，应用候选前需按当前乐谱重新生成。
 
-需要长期保存或换电脑时，可从「查看详情」导出 JSON，再在对应项目中通过「⋯ → 导入复核记录…」恢复反馈。导入的候选由当前音频重新生成。记录包含音符、反馈及用量，音频与 API Key 留在原处。
+「查看详情」可手动导出 JSON。「⋯ → 导入复核记录…」可在对应乐谱上恢复反馈，候选从当前音频重新生成。手动导出的记录仅含音符、反馈及用量等报告数据。
 
 本地修正包括音高／起音微调和疑点乐句重建。重建可补入有音频支持的漏音、拆分或合并音符，保留选区外音符；声部错误仍需人工选择。**手动应用不表示云端复核通过，“云端复核通过”也不是音准准确率。** 已观察到 Qwen 的漏报及时间判断错误，仍需人工试听。实现与验证边界见 [音频复核循环说明](docs/音频复核循环说明.md)。
 
@@ -113,7 +113,7 @@ Key 只在本次进程内保留，不写入设置、项目、日志或复核报�
 
 本次重构构建可用 `--distpath dist/rebuild --workpath build/rebuild` 单独输出，不覆盖旧目录包。迁移内容与实测边界见 [本地重构验证记录](docs/本地重构验证记录.md)。旧 `.noteflow` 项目可读取，新保存格式为版本 2。
 
-音频复核版本可用 `--distpath dist/audio-review-cache --workpath build/audio-review-cache` 单独构建，入口为 `dist/audio-review-cache/NoteFlow/NoteFlow.exe`。
+音频复核版本可用 `--distpath dist/audio-review-session --workpath build/audio-review-session` 单独构建，入口为 `dist/audio-review-session/NoteFlow/NoteFlow.exe`。
 
 ## 运行 M0
 

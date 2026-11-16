@@ -1,8 +1,9 @@
 """Wire the local evidence, renderer and cloud reviewer into a review session."""
 
+from dataclasses import replace
 from pathlib import Path
 
-from .review import run_review, save_report
+from .review import run_review
 from .review_audio import ReviewAudio
 from .review_audio import wav_bytes
 from .review_edit import candidate_notes
@@ -26,11 +27,9 @@ def review_score(analysis, score, tools, config, folder, *, limits, start_s, end
 
     repair = LocalRepair(evidence, analysis.options, start_s=start_s, end_s=end_s)
 
-    def checkpoint(result):
-        save_report(result, folder / "report.json", model=config.model, usage=reviewer.usage)
-
-    return run_review(score.melody, analysis.duration_s, reviewer, repair, limits=limits,
-                      start_s=start_s, end_s=end_s, cancel=cancel, progress=progress, checkpoint=checkpoint)
+    result = run_review(score.melody, analysis.duration_s, reviewer, repair, limits=limits,
+                        start_s=start_s, end_s=end_s, cancel=cancel, progress=progress)
+    return replace(result, model=config.model, usage=reviewer.usage.copy())
 
 
 def prepare_repairs(analysis, score, tools, folder, issues, *, start_s, end_s,

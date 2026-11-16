@@ -160,8 +160,9 @@ def test_review_configuration_does_not_save_credentials_and_requires_valid_range
     dialog.close()
 
 
-def test_review_button_restores_candidates_after_reopening_project(app, window, tmp_path, monkeypatch):
-    from noteflow.review import RepairCandidate, ReviewIssue, ReviewLimits, Verdict, fingerprint, run_review, save_report
+def test_review_button_keeps_candidates_only_until_app_exit(app, window, tmp_path, monkeypatch):
+    import json
+    from noteflow.review import RepairCandidate, ReviewIssue, ReviewLimits, Verdict, fingerprint, run_review
     from noteflow.review_qwen import QwenConfig
     from noteflow.review_ui import ReviewRequest
     from noteflow.score import ScoreSettings, build_score
@@ -202,9 +203,7 @@ def test_review_button_restores_candidates_after_reopening_project(app, window, 
         else:
             reviewer = Reviewer()
         result = run_review(score.melody, analysis.duration_s, reviewer, lambda *args: revised)
-        folder.mkdir()
-        save_report(result, folder / "report.json", model=config.model, usage={"total_tokens": 11})
-        return result
+        return replace(result, model=config.model, usage={"total_tokens": 11})
 
     monkeypatch.setattr(desktop, "ReviewDialog", ConfirmReview)
     monkeypatch.setattr(desktop, "review_score", review_score)
@@ -212,8 +211,8 @@ def test_review_button_restores_candidates_after_reopening_project(app, window, 
     wait_for(app, lambda: window._review_dialog is not None)
     candidate = RepairCandidate(revised, fingerprint(baseline), 0, 2, "局部微调")
     assert window._review_dialog.candidate == candidate
-    cache = window._review_cache_path
-    assert cache.is_file() and b"session-only-key" not in cache.read_bytes()
+    assert not list(window.workdir.rglob("*.json"))
+    assert not (tmp_path / "review-records").exists()
 
     window._review_dialog.close_button.click()
     window.review_button.click()
@@ -222,17 +221,26 @@ def test_review_button_restores_candidates_after_reopening_project(app, window, 
     wait_for(app, lambda: window._review_dialog is not None and window._thread is None)
     assert len(confirmations) == len(calls) == 2 and window._review_dialog.candidate == candidate
     assert "已保留上次复核记录" in window._review_dialog.status.text()
+
+    exported = tmp_path / "exported.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(exported), ""))
+    window._review_dialog.details_toggle.click()
+    window._review_dialog.export_button.click()
+    payload = exported.read_text(encoding="utf-8")
+    assert "session-only-key" not in payload
+    assert json.loads(payload)["usage"] == {"total_tokens": 11}
     window._review_dialog.close_button.click()
 
     project = tmp_path / "score.noteflow"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(project), ""))
     window.save_project()
     wait_for(app, lambda: window._thread is None)
-    project_cache = window._review_cache_path
-    assert project.is_file() and project_cache.is_file() and cache != project_cache
+    assert project.is_file() and not list(window.workdir.rglob("*.json"))
+    window.review_button.click()
+    assert window._review_dialog.candidate == candidate
     session_dir = window.workdir
     window.close()
-    assert not session_dir.exists()
+    assert window._review_result is None and not session_dir.exists()
 
     reopened = desktop.MainWindow(tmp_path, settings=window.settings, tools=window.tools)
     monkeypatch.setattr(reopened, "_confirm_discard", lambda *args: True)
@@ -240,15 +248,9 @@ def test_review_button_restores_candidates_after_reopening_project(app, window, 
     try:
         reopened.open_source(project)
         wait_for(app, lambda: reopened._thread is None)
-        reopened.review_button.click()
-        assert reopened._review_dialog.candidate == candidate and reopened.score.melody == baseline
-        assert len(confirmations) == len(calls) == 2 and reopened._review_cache_path == project_cache
-        reopened._review_dialog.close_button.click()
-        reopened._apply_notes(revised)
-        reopened.review_button.click()
-        assert not reopened._review_dialog.apply.isVisible() and reopened._review_dialog.prepare.isVisible()
-        reopened._review_dialog.close_button.click()
-        reopened.undo()
+        assert reopened._review_result is None and reopened.score.melody == baseline
+        assert not reopened.review_report_action.isEnabled()
+        assert len(confirmations) == len(calls) == 2
     finally:
         reopened.close()
 

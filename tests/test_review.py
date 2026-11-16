@@ -38,7 +38,7 @@ def test_repair_requires_both_orders_and_new_complete_assessment(tmp_path):
     assert result.calls == 4 and result.accepted == 1
     assert judge.comparisons == [(BASE, FIXED), (FIXED, BASE)]
     assert snapshots[0].status != "passed"
-    save_report(result, tmp_path / "report.json", model="test")
+    save_report(replace(result, model="test"), tmp_path / "report.json")
     saved = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     assert saved["accuracy"] is None and saved["baseline"][0]["midi"] == 62
 
