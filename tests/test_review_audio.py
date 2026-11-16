@@ -87,3 +87,27 @@ def test_review_service_uses_rendered_audio_local_repair_and_complete_final_revi
     assert calls == [17, 26, 26, 17]
     report = json.loads((tmp_path / "session/report.json").read_text(encoding="utf-8"))
     assert report["usage"]["total_tokens"] == 400 and report["accuracy"] is None
+
+
+def test_candidate_audition_has_three_aligned_real_audio_files(tmp_path):
+    import shutil
+    from pathlib import Path
+    from noteflow.analysis import AnalysisResult
+    from noteflow.review import RepairCandidate, fingerprint
+    from noteflow.review_service import prepare_audition
+    from noteflow.score import build_score
+    tools = _default_tools()
+    if not shutil.which(tools.ffmpeg) or not shutil.which(tools.fluidsynth) or not Path(tools.soundfont).is_file():
+        pytest.skip("Requires the playback tools")
+    media, clean, wrong, _, _ = prepare_cases(tmp_path / "source")
+    candidate = RepairCandidate(clean, fingerprint(wrong), 0, 8, "恢复已知旋律")
+    paths, first, last = prepare_audition(AnalysisResult(media, 8, wrong), build_score(wrong, ScoreSettings()),
+                                         candidate, tools, tmp_path / "audition")
+    assert (first, last) == (0, 8) and len(paths) == 3
+    samples = []
+    for path in paths:
+        with wave.open(str(path)) as wav:
+            assert wav.getnframes() == RATE * 8 and wav.getframerate() == RATE
+            samples.append(np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2"))
+    assert np.any(samples[1] != samples[2])
+    assert all(not track[:round(.35 * RATE)].any() for track in samples)

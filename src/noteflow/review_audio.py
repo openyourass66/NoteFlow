@@ -68,23 +68,28 @@ class ReviewAudio:
             self._renders[signature] = read_pcm(converted)[0]
         return self._renders[signature]
 
-    def bundle(self, variants, first, last):
-        """One WAV works with single-audio and multi-audio Omni model versions.
-
-        Each named section uses the same source time interval, padded with real
-        silence when needed. Section offsets are explicitly described to the judge.
-        """
+    def clips(self, variants, first, last):
+        """Equally long aligned clips, also used for local A/B audition."""
         check_cancelled(self.cancel)
         start, end = round(first * RATE), round(last * RATE)
-        if not 0 <= start < end <= len(self._reference) + 2 or last - first > 20.00001:
+        if not 0 <= start < end <= len(self._reference) + 2:
             raise ValueError("Invalid listening interval")
         tracks = [("R（原曲）", self._reference)]
         tracks += [(label, self.performance(notes)) for label, notes in variants]
-        pieces, labels, cursor = [], [], 0
+        result = []
         for label, samples in tracks:
             clip = samples[start:end]
             clip = np.pad(clip, (0, max(0, end - start - len(clip))))
-            pieces.append(_level(clip))
+            result.append((label, _level(clip)))
+        return result
+
+    def bundle(self, variants, first, last):
+        """One explicitly labeled WAV for the cloud listening comparison."""
+        if last - first > 20.00001:
+            raise ValueError("Invalid listening interval")
+        pieces, labels, cursor = [], [], 0
+        for label, clip in self.clips(variants, first, last):
+            pieces.append(clip)
             labels.append(f"{label}: 合集 {cursor / RATE:.4f}–{(cursor + len(clip)) / RATE:.4f} 秒")
             pieces.append(np.zeros(RATE, dtype="<i2"))
             cursor += len(clip) + RATE

@@ -2,15 +2,14 @@
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout,
 )
 
-from .review import ReviewLimits, STATUS_TEXT
+from .review import ReviewLimits
 from .review_qwen import DEFAULT_MODEL, QwenConfig
 
 
@@ -121,51 +120,12 @@ class ReviewDialog(QDialog):
 
 
 def show_report(parent, result, report_path, current_notes=None):
-    dialog = QDialog(parent)
-    dialog.setWindowTitle("音频复核结果")
-    dialog.resize(700, 510)
-    layout = QVBoxLayout(dialog)
-    text = [STATUS_TEXT[result.status],
-            f"范围：{result.start_s:.2f}–{result.end_s:.2f} 秒；请求 {result.calls} 次；采用修改 {result.accepted} 轮。",
-            "这是辅助听辨结果，准确率未测定。当前乐谱可直接试听；采用的修改可通过“撤销”恢复。", ""]
-    if current_notes is not None and tuple(current_notes) != result.notes:
-        text.insert(0, "当前乐谱已经变化；以下记录仅对应本次复核结束时的版本。")
-    for event in result.events:
-        stage = event["stage"]
-        if stage == "assess":
-            text.append(f"第 {event['round']} 轮 · {event['start_s']:.2f}–{event['end_s']:.2f} 秒：{event['summary']}")
-            for issue in event["issues"]:
-                text.append(f"  {issue['start_s']:.2f}–{issue['end_s']:.2f} 秒：{issue['explanation']}")
-        elif stage == "compare":
-            text.append(f"前后对照{'（交换顺序）' if event['reversed'] else ''}：{event['summary']}")
-        elif stage == "accepted":
-            text.append("已采用这一轮的候选修改。")
-        elif stage == "error":
-            text.append(event["summary"])
-    view = QPlainTextEdit("\n".join(text))
-    view.setReadOnly(True)
-    view.setAccessibleName("复核结果与修改记录")
-    layout.addWidget(view)
-    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-    buttons.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
-    export = buttons.addButton("导出复核记录…", QDialogButtonBox.ButtonRole.ActionRole)
-    error = QLabel()
-    error.setTextFormat(Qt.TextFormat.PlainText)
-    error.setWordWrap(True)
-
-    def save():
-        selected, _ = QFileDialog.getSaveFileName(dialog, "导出复核记录", "音频复核.json", "JSON (*.json)")
-        if selected:
-            try:
-                Path(selected).write_bytes(Path(report_path).read_bytes())
-            except OSError:
-                error.setText("无法保存复核记录，请选择可写入的位置。")
-
-    export.clicked.connect(save)
-    buttons.rejected.connect(dialog.reject)
-    layout.addWidget(error)
-    layout.addWidget(buttons)
+    from .review_results_ui import ReviewReportDialog
+    dialog = ReviewReportDialog(parent, result, report_path, current_notes if current_notes is not None else result.notes)
     dialog.exec()
+    action = dialog.action
+    dialog.deleteLater()
+    return action
 
 
 def show_calibration(parent, report):

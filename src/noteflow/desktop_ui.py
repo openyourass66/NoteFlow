@@ -119,6 +119,7 @@ def _workflow_toolbar(w):
     menu.addSeparator()
     w.settings_action = menu.addAction("工具设置…", w.configure_tools)
     w.review_report_action = menu.addAction("最近音频复核记录…", w.show_review_report)
+    w.review_import_action = menu.addAction("导入复核记录…", w.choose_review_report)
     menu.addAction("使用说明", w.show_help)
     _menu_action(w, menu, "退出", w.close, "Ctrl+Q")
     more.setMenu(menu)

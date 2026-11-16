@@ -120,3 +120,10 @@ def test_local_timestamps_translate_exactly_once():
     verdict = parse_verdict(json.dumps({"status": "issues", "summary": "", "issues": [
         {"start_s": .5, "end_s": 1, "kind": "rhythm", "explanation": "晚起音"}]}), 20, 25)
     assert verdict.issues[0].start_s == 20.5
+
+
+def test_uncertain_feedback_can_keep_proposals_but_never_auto_apply_them():
+    judge = Judge([Verdict("uncertain", (ISSUE,))])
+    result = run_review(BASE, 2, judge, lambda *a: FIXED)
+    assert result.status == "uncertain" and result.notes == BASE and not judge.comparisons
+    assert result.candidates[0].notes == FIXED

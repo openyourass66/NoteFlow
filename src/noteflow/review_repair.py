@@ -1,4 +1,4 @@
-"""Generate small repairs from acoustic evidence, never from free-form advice."""
+"""Generate micro-edits and phrase candidates from local acoustic evidence."""
 
 from dataclasses import dataclass, replace
 
@@ -6,6 +6,8 @@ import numpy as np
 
 from .options import AnalysisOptions
 from .process import check_cancelled
+from .notes import NoteEvent
+from .review import RepairCandidate, RepairPlan, fingerprint
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +55,110 @@ class LocalRepair:
         self.options = options
         self.start_s, self.end_s = start_s, end_s
         self.evidence = None
+
+    def propose(self, notes, issues, cancel=None):
+        """Keep strict micro-edits first; also rebuild whole flagged phrases.
+
+        Rebuilding can split, merge or insert notes. These are listening
+        candidates, not trusted edits: adoption still needs comparison or an
+        explicit user action, and outside notes remain exactly unchanged.
+        """
+        candidates, diagnostics = [], []
+        signature = fingerprint(notes)
+        seen = {signature}
+        micro = self(notes, issues, cancel)
+        if fingerprint(micro) != signature:
+            candidates.append(RepairCandidate(micro, signature, self.start_s, self.end_s, "音高与起音微调"))
+            seen.add(fingerprint(micro))
+        for issue in issues:
+            check_cancelled(cancel)
+            entry = {"start_s": issue.start_s, "end_s": issue.end_s, "kind": issue.kind}
+            if issue.kind == "wrong_voice":
+                diagnostics.append({**entry, "summary": "声部选择需要确认；可定位音符，或调整高低声部后重新识别。"})
+                continue
+            if self.evidence is None:
+                self.evidence = self.load_evidence(cancel)
+            rebuilt = self._rebuild(notes, issue, cancel)
+            if rebuilt is None:
+                diagnostics.append({**entry, "summary": "本地没有找到不同且有音频支持的乐句；可定位后手动编辑。"})
+                continue
+            new_notes, first, last = rebuilt
+            key = fingerprint(new_notes)
+            if key in seen:
+                diagnostics.append({**entry, "summary": "此处候选与已有音符或其他候选相同，未重复生成。"})
+                continue
+            seen.add(key)
+            candidates.append(RepairCandidate(new_notes, signature, first, last,
+                                               f"{first:.2f}–{last:.2f} 秒局部重建"))
+            diagnostics.append({**entry, "summary": "已生成局部重建候选；对照通过后自动采用，也可试听后手动应用。"})
+        return RepairPlan(tuple(candidates), tuple(diagnostics))
+
+    def _rebuild(self, notes, issue, cancel):
+        from .melody import melody_events
+
+        first, last = max(self.start_s, issue.start_s), min(self.end_s, issue.end_s)
+        if last <= first:
+            return None
+        affected = [n for n in notes if n.start_s < last and n.end_s > first
+                    and n.start_s >= self.start_s and n.end_s <= self.end_s]
+        if affected:
+            first, last = min(first, affected[0].start_s), max(last, affected[-1].end_s)
+        # A note crossing the user's selected boundary cannot be partly edited.
+        for note in notes:
+            if note.start_s < first < note.end_s:
+                first = note.end_s
+            if note.start_s < last < note.end_s:
+                last = note.start_s
+        if last - first < .08:
+            return None
+        affected = [n for n in notes if first <= n.start_s and n.end_s <= last]
+        evidence = self.evidence
+        indices = np.flatnonzero((evidence.times >= max(0, first - 2)) & (evidence.times <= last + 2))
+        if len(indices) < 4:
+            return None
+        section = slice(int(indices[0]), int(indices[-1]) + 1)
+        dt = float(np.median(np.diff(evidence.times)))
+        times = evidence.times[section]
+        frames = evidence.frames[section].copy()
+        options = self.options
+        # Keep the established local lead register for rhythm/continuity work.
+        # Pitch and octave questions need the original configured range.
+        if affected and issue.kind in {"rhythm", "fragmentation", "missing_notes"}:
+            low = max(options.pitch_min, min(n.midi for n in affected) - 3)
+            high = min(options.pitch_max, max(n.midi for n in affected) + 3)
+            if low < high:
+                options = replace(options, pitch_min=low, pitch_max=high)
+        if self.options.target == "vocal" and evidence.f0_midi is not None:
+            bins = np.arange(frames.shape[1]) + evidence.midi_offset
+            f0 = np.exp(-.5 * ((evidence.f0_midi[section, None] - bins) / .45) ** 2)
+            weight = np.clip((evidence.f0_confidence[section] - .35) / .45, 0, 1)[:, None]
+            frames = frames * (1 - .35 * weight) + f0 * (.45 * weight)
+        events = melody_events(frames, evidence.onsets[section], evidence.rms[section],
+                               np.r_[times, times[-1] + dt], evidence.midi_offset,
+                               isolated=options.target == "vocal", cancel=cancel, options=options,
+                               pitch_attacks=evidence.attacks[section])
+        proposed, used = [], set()
+        for start, end, pitch, strength in events:
+            start, end = max(first, start), min(last, end)
+            if end - start < .045 or strength < .35:
+                continue
+            # Preserve identities and expressive velocities where a note matches.
+            matches = [n for n in affected if n.id not in used and min(n.end_s, end) > max(n.start_s, start)]
+            match = max(matches, key=lambda n: min(n.end_s, end) - max(n.start_s, start), default=None)
+            note_id = match.id if match else f"review-{start:.6f}-{end:.6f}-{pitch}"
+            used.add(note_id)
+            proposed.append(NoteEvent(note_id, float(start), float(end), int(pitch), float(strength),
+                                      match.velocity if match else 80))
+        if not proposed:
+            return None
+        # Do not offer a new version for model-frame jitter alone.
+        if len(proposed) == len(affected) and all(
+            a.midi == b.midi and abs(a.start_s - b.start_s) < .025 and abs(a.end_s - b.end_s) < .025
+            for a, b in zip(proposed, affected)
+        ):
+            return None
+        kept = tuple(n for n in notes if not (first <= n.start_s and n.end_s <= last))
+        return tuple(sorted((*kept, *proposed), key=lambda n: n.start_s)), first, last
 
     def __call__(self, notes, issues, cancel=None):
         actionable = [i for i in issues if i.kind in {"pitch", "octave", "rhythm", "fragmentation"}]

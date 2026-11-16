@@ -34,7 +34,9 @@ from .score import Score, ScoreSettings, build_score, rekey
 from .separation import Stems, separate
 from .synthesis import render_preview
 from .review import STATUS_TEXT
-from .review_service import review_score
+from .review_edit import apply_manual, load_report, write_report
+from .review_service import prepare_audition, prepare_repairs, review_score
+from .review_results_ui import CandidateAuditionDialog
 from .review_ui import ReviewDialog, show_report, show_calibration
 from .review_calibration import check_reviewer
 
@@ -156,6 +158,7 @@ class MainWindow(QMainWindow):
         self.settings_action.setEnabled(not busy)
         self.review_button.setEnabled(ready and bool(self.score.melody) and not busy)
         self.review_report_action.setEnabled(self._review_result is not None and not busy)
+        self.review_import_action.setEnabled(ready and not busy)
         self.generate_button.setEnabled(media_ready)
         self.open_project_button.setEnabled(not self._closing)
         self.save_button.setEnabled(media_ready)
@@ -274,15 +277,12 @@ class MainWindow(QMainWindow):
             def calibrate(cancel, progress):
                 return check_reviewer(tools, request.config, folder, send=True, cancel=cancel, progress=progress)
             def calibrated(report):
-                self._status(f"复核能力检查结束，共请求 {report['calls']} 次；结果：{report['status']}。")
+                label = {"passed": "通过", "failed": "未通过", "cancelled": "已取消", "error": "出错"}.get(report["status"], "未完成")
+                self._status(f"复核能力检查结束，共请求 {report['calls']} 次；结果：{label}。")
                 show_calibration(self, report)
             self._start("正在准备已知旋律检查…", calibrate, calibrated, keep_cancelled=True)
             return
-        use_stem = analysis.options.source == "separated" or (
-            analysis.options.source == "auto" and analysis.options.target == "vocal")
-        stem = None
-        if use_stem and self.stems:
-            stem = self.stems.vocals if analysis.options.target == "vocal" else self.stems.accompaniment
+        stem = self._review_stem()
 
         def operation(cancel, progress):
             return review_score(analysis, score, tools, request.config, folder, limits=request.limits,
@@ -300,8 +300,106 @@ class MainWindow(QMainWindow):
         self._start("正在准备音频复核…", operation, finished, keep_cancelled=True)
 
     def show_review_report(self):
-        if self._review_result is not None:
-            show_report(self, self._review_result, self._review_report_path, self.score.melody if self.score else ())
+        if self._review_result is None or self.score is None or self._thread is not None or self._closing:
+            return
+        action = show_report(self, self._review_result, self._review_report_path, self.score.melody)
+        if action is None:
+            return
+        if action.kind == "locate":
+            issue = action.issues[0]
+            self.tabs.setCurrentIndex(1)
+            notes = self.score.melody
+            if notes:
+                note = next((n for n in notes if n.end_s > issue.start_s and n.start_s < issue.end_s),
+                            min(notes, key=lambda n: abs(n.start_s - issue.start_s)))
+                self._select_note(note.id)
+                self.note_table.scrollToItem(self.note_table.item(self.note_table.currentRow(), 0))
+            self._status(f"已定位 {issue.start_s:.2f}–{issue.end_s:.2f} 秒；可编辑音高和起止时间，Ctrl+Z 撤销。")
+        elif action.kind == "prepare":
+            self._prepare_review_candidates(action.issues)
+        elif action.kind == "preview":
+            self._preview_review_candidate(action.candidate)
+        elif action.kind == "apply":
+            self._apply_review_candidate(action.candidate)
+
+    def _review_stem(self):
+        options = self.analysis.options
+        use_stem = options.source == "separated" or (options.source == "auto" and options.target == "vocal")
+        if use_stem and self.stems:
+            return self.stems.vocals if options.target == "vocal" else self.stems.accompaniment
+        return None
+
+    def choose_review_report(self):
+        if self.score is None or self._thread is not None:
+            return
+        selected, _ = QFileDialog.getOpenFileName(self, "导入对应乐谱的复核记录", "", "JSON (*.json)")
+        if not selected:
+            return
+        try:
+            result = load_report(Path(selected), self.score.melody, self.analysis.duration_s)
+            path = self.workdir / f"review-{uuid4().hex}" / "report.json"
+            write_report(result, path, previous=selected)
+        except (ValueError, OSError) as error:
+            self._status(str(error) if isinstance(error, ValueError) else "无法保存导入的复核记录。")
+            return
+        self._review_result, self._review_report_path = result, path
+        self._sync_controls()
+        self.show_review_report()
+
+    def _store_review_result(self, result):
+        path = self._review_report_path or self.workdir / f"review-{uuid4().hex}" / "report.json"
+        try:
+            write_report(result, path, previous=self._review_report_path)
+        except (ValueError, OSError):
+            self._status("无法保存复核记录，本次操作未应用，请检查磁盘可用空间。")
+            return False
+        self._review_result, self._review_report_path = result, path
+        self._sync_controls()
+        return True
+
+    def _prepare_review_candidates(self, issues):
+        if not issues:
+            return
+        self._stop_player()
+        analysis, score, tools, result = self.analysis, self.score, self.tools, self._review_result
+        stem = self._review_stem()
+        folder = self.workdir / f"repair-{uuid4().hex}"
+        def operation(cancel, progress):
+            return prepare_repairs(analysis, score, tools, folder, issues, start_s=result.start_s,
+                                   end_s=result.end_s, stem=stem, cancel=cancel, progress=progress)
+        def finished(plan):
+            events = tuple({"round": result.rounds, "stage": "repair", **item} for item in plan.diagnostics)
+            updated = replace(result, notes=score.melody, candidates=plan.candidates,
+                              status="candidates" if plan.candidates else "unsupported", events=(*result.events, *events))
+            if self._store_review_result(updated):
+                self._status(f"本地生成 {len(plan.candidates)} 个候选，尚未应用；本次未调用云端。")
+                self.show_review_report()
+        self._start("正在重建复核疑点片段…", operation, finished)
+
+    def _preview_review_candidate(self, candidate):
+        self._stop_player()
+        analysis, score, tools = self.analysis, self.score, self.tools
+        folder = self.workdir / f"audition-{uuid4().hex}"
+        def operation(cancel, progress):
+            return prepare_audition(analysis, score, candidate, tools, folder, cancel=cancel)
+        def finished(value):
+            paths, first, last = value
+            dialog = CandidateAuditionDialog(self, paths, first, last)
+            if dialog.exec():
+                self._apply_review_candidate(candidate)
+            dialog.deleteLater()
+            QTimer.singleShot(0, self.show_review_report)
+        self._start("正在生成原曲／修改前／候选对照音频…", operation, finished)
+
+    def _apply_review_candidate(self, candidate):
+        try:
+            updated = apply_manual(self._review_result, candidate, self.score.melody, self.analysis.duration_s)
+        except ValueError as error:
+            self._status(str(error))
+            return
+        if self._store_review_result(updated):
+            self._apply_notes(updated.notes)
+            self._status("候选已应用：简谱与演奏已更新，可用 Ctrl+Z 撤销；尚未重新通过云端复核。")
 
     def choose_source(self):
         patterns = " ".join(f"*{suffix}" for suffix in MEDIA_SUFFIXES)
@@ -948,7 +1046,9 @@ class MainWindow(QMainWindow):
             "2. 自动选源：乐器使用原曲，人声先分离。也可直接识别清唱或独奏。\n"
             "3. 在音符编辑页修正音高、起止时间和力度，Ctrl+Z 可撤销。\n"
             "4. 演奏保留原始节奏，排谱校准不改变声音；点击音符可定位。\n"
-            "5. Ctrl+S 保存项目。项目包含原曲、分轨和音符，可离线恢复。\n\n"
+            "5. Ctrl+S 保存项目。项目包含原曲、分轨和音符，可离线恢复。\n"
+            "6. 音频复核结果中可重建疑点片段，对照试听后应用候选；也可定位音符编辑。\n"
+            "7. 复核记录需单独导出；在更多菜单中可导入对应项目的记录，无需重新上传。\n\n"
             "当前支持固定 4/4 拍、恒定速度和最长 120 秒片段。")
 
     def closeEvent(self, event):

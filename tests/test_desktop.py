@@ -160,6 +160,80 @@ def test_review_configuration_does_not_save_credentials_and_requires_valid_range
     dialog.close()
 
 
+def test_review_results_rebuild_audition_apply_undo_and_import(app, window, tmp_path, monkeypatch):
+    from noteflow.review import RepairCandidate, RepairPlan, ReviewResult, fingerprint, save_report
+    from noteflow.review_edit import latest_issues
+    from noteflow.review_results_ui import ReviewAction, ReviewReportDialog
+    from noteflow.score import build_score, ScoreSettings
+    media = MediaInfo(tmp_path / "source.wav", 0, "pcm_s16le", "wav", 2)
+    baseline = (NoteEvent("lead", .1, 1, 62, .7, 80),)
+    fixed = (replace(baseline[0], midi=60),)
+    candidate = RepairCandidate(fixed, fingerprint(baseline), .1, 1, "局部重建")
+    events = ({"stage": "assess", "round": 1, "start_s": 0, "end_s": 2,
+               "status": "issues", "summary": "音高疑点", "issues": [
+                   {"start_s": .1, "end_s": 1, "kind": "pitch", "explanation": "偏高"}]},)
+    result = ReviewResult(baseline, baseline, "unsupported", 1, 1, 0, events, 0, 2)
+    path = tmp_path / "saved-review.json"
+    save_report(result, path)
+    original_file = path.read_bytes()
+    window._imported(media)
+    window._generated(desktop.GeneratedScore(AnalysisResult(media, 2, baseline), build_score(baseline, ScoreSettings())))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a: (str(path), ""))
+    monkeypatch.setattr(desktop, "show_report", lambda *a: None)
+    window.choose_review_report()
+    assert window._review_result.notes == baseline and window.review_report_action.isEnabled()
+    result_dialog = ReviewReportDialog(window, result, path, baseline)
+    assert not result_dialog.apply.isEnabled()
+    result_dialog.locate.click()
+    monkeypatch.setattr(desktop, "show_report", lambda *a: result_dialog.action)
+    window.show_review_report()
+    assert window.tabs.currentIndex() == 1 and window.note_table.currentRow() == 0
+    calls = []
+    def prepare(*args, **kwargs):
+        calls.append(args[4])
+        return RepairPlan((candidate,), ({"start_s": .1, "end_s": 1, "summary": "已重建"},))
+    monkeypatch.setattr(desktop, "prepare_repairs", prepare)
+    monkeypatch.setattr(desktop, "show_report", lambda *a: ReviewAction("prepare", latest_issues(result)))
+    window.show_review_report()
+    monkeypatch.setattr(desktop, "show_report", lambda *a: None)
+    wait_for(app, lambda: window._thread is None)
+    assert calls and window._review_result.candidates == (candidate,)
+    assert window.score.melody == baseline and window._review_result.calls == 1
+    # The audition job must not edit on dismissal; acceptance uses the same
+    # canonical notes and undo history as applying from the results dialog.
+    monkeypatch.setattr(desktop, "prepare_audition", lambda *a, **k: ((path, path, path), 0, 2))
+    class DismissedAudition:
+        def __init__(self, *a):
+            pass
+        def exec(self):
+            return 0
+        def deleteLater(self):
+            pass
+    monkeypatch.setattr(desktop, "CandidateAuditionDialog", DismissedAudition)
+    window._preview_review_candidate(candidate)
+    wait_for(app, lambda: window._thread is None)
+    app.processEvents()
+    assert window.score.melody == baseline and not window._undo
+    result_dialog = ReviewReportDialog(window, window._review_result, window._review_report_path, baseline)
+    assert result_dialog.preview.isEnabled() and result_dialog.apply.isEnabled()
+    result_dialog.apply.click()
+    monkeypatch.setattr(desktop, "show_report", lambda *a: result_dialog.action)
+    window.show_review_report()
+    assert window.score.melody == fixed and window._edited_notes == fixed and window._dirty
+    assert window._review_result.status == "manual" and window._review_result.accepted == 0
+    window.undo_button.click()
+    assert window.score.melody == baseline
+    window.redo_button.click()
+    assert window.score.melody == fixed
+    window._apply_review_candidate(candidate)
+    assert "乐谱已变化" in window.status.text() and len(window._undo) == 1
+    stale = ReviewReportDialog(window, replace(result, candidates=(candidate,)), path, fixed)
+    assert not stale.preview.isEnabled() and not stale.apply.isEnabled() and stale.prepare.isEnabled()
+    assert path.read_bytes() == original_file
+    result_dialog.close()
+    stale.close()
+
+
 def test_desktop_generates_calibrates_and_exports(app, window, tmp_path, monkeypatch):
     source = tmp_path / "旋律 样本.wav"
     write_wave(source, 10, melody())

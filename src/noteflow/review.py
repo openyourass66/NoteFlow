@@ -30,6 +30,21 @@ class Verdict:
 
 
 @dataclass(frozen=True, slots=True)
+class RepairCandidate:
+    notes: tuple[NoteEvent, ...]
+    baseline_fingerprint: str
+    start_s: float
+    end_s: float
+    title: str
+
+
+@dataclass(frozen=True, slots=True)
+class RepairPlan:
+    candidates: tuple[RepairCandidate, ...] = ()
+    diagnostics: tuple[dict, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewLimits:
     max_rounds: int = 3
     max_calls: int = 24
@@ -53,6 +68,7 @@ class ReviewResult:
     events: tuple[dict, ...]
     start_s: float
     end_s: float
+    candidates: tuple[RepairCandidate, ...] = ()
 
 
 STATUS_TEXT = {
@@ -65,11 +81,15 @@ STATUS_TEXT = {
     "cycle": "候选重复，已停止循环",
     "cancelled": "复核已取消，已保留上一次采用的版本",
     "error": "复核中断，已保留上一次采用的版本",
+    "manual": "已手动应用候选，尚未重新通过云端复核",
+    "candidates": "局部候选已生成，请试听后决定是否应用",
 }
 
 
 def fingerprint(notes):
-    payload = [(n.id, n.start_s, n.end_s, n.midi, n.velocity, n.strength) for n in notes]
+    # Identity and confidence do not change the sound. Newly decoded IDs must
+    # not defeat cycle detection or make the same performance a new candidate.
+    payload = [(round(float(n.start_s), 9), round(float(n.end_s), 9), n.midi, n.velocity) for n in notes]
     return hashlib.sha256(json.dumps(payload, allow_nan=False).encode()).hexdigest()
 
 
@@ -146,7 +166,7 @@ def run_review(notes, duration, reviewer, repair, *, start_s=0.0, end_s=None,
     notes = tuple(notes)
     validate_notes(notes, duration)
     baseline = best = notes
-    seen, events = {fingerprint(notes)}, []
+    seen, events, candidates = {fingerprint(notes)}, [], ()
     calls = rounds = accepted = 0
     windows, cursor = [], start_s
     while cursor < end_s - 1e-5:
@@ -155,7 +175,9 @@ def run_review(notes, duration, reviewer, repair, *, start_s=0.0, end_s=None,
         cursor = stop
 
     def result(status):
-        snapshot = ReviewResult(baseline, best, status, calls, rounds, accepted, tuple(events), start_s, end_s)
+        current_candidates = tuple(c for c in candidates if c.baseline_fingerprint == fingerprint(best))
+        snapshot = ReviewResult(baseline, best, status, calls, rounds, accepted, tuple(events), start_s, end_s,
+                                current_candidates)
         if checkpoint:
             checkpoint(snapshot)
         return snapshot
@@ -181,14 +203,25 @@ def run_review(notes, duration, reviewer, repair, *, start_s=0.0, end_s=None,
                                **asdict(verdict)})
                 issues.extend(verdict.issues)
                 uncertain |= verdict.status == "uncertain"
-            if uncertain:
+            if uncertain and not issues:
                 return result("uncertain")
             if not issues:
                 return result("passed")
             check_cancelled(cancel)
             if progress:
                 progress("正在用本地音高与起音证据检查疑点…")
-            candidate = tuple(repair(best, tuple(issues), cancel))
+            if hasattr(repair, "propose"):
+                plan = repair.propose(best, tuple(issues), cancel)
+                candidates = plan.candidates
+                events.extend({"round": rounds, "stage": "repair", **item} for item in plan.diagnostics)
+                if not candidates:
+                    return result("unsupported")
+                candidate = candidates[0].notes
+            else:
+                candidate = tuple(repair(best, tuple(issues), cancel))
+                candidates = (RepairCandidate(candidate, fingerprint(best), start_s, end_s, "局部微调"),) if candidate != best else ()
+            if uncertain:
+                return result("uncertain")
             validate_notes(candidate, duration)
             # Local edits cannot affect any note crossing the review boundary.
             outside = lambda ns: tuple(n for n in ns if n.start_s < start_s or n.end_s > end_s)
@@ -229,7 +262,7 @@ def run_review(notes, duration, reviewer, repair, *, start_s=0.0, end_s=None,
 
 
 def save_report(result: ReviewResult, destination: Path, *, model="", usage=None):
-    payload = {"version": 1, "model": model, "accuracy": None, "usage": usage or {}, **asdict(result)}
+    payload = {"version": 2, "model": model, "accuracy": None, "usage": usage or {}, **asdict(result)}
     temporary = destination.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
     temporary.replace(destination)
