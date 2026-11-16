@@ -15,6 +15,7 @@ analysis = Analysis(
     datas=collect_data_files("basic_pitch", includes=["saved_models/icassp_2022/nmp.onnx"])
           + [(str(directory.parent / "src/noteflow/pitch_worker.py"), "noteflow")],
     module_collection_mode={"librosa": "py"},
+    hiddenimports=["anyio._backends._asyncio"],
     excludes=["tensorflow", "IPython", "matplotlib", "pytest"],
 )
 pyz = PYZ(analysis.pure)

@@ -31,3 +31,9 @@ Windows 目录包基于 `poc/requirements-win-x64.lock` 中的依赖构建。以
 Demucs 权重由其官方加载器首次下载到本地缓存，torchcrepe 权重随 Python 包安装。当前使用这些模型作候选证据，不将单一 F0 轨迹直接视为混音中的主旋律。安装与首次下载需要网络，正常音频推理不使用远程服务。
 
 本地使用的 torchcrepe `full.pth` SHA-256：`133225604dedd2e4005f8bbd1bd0a2ec073ba8b7a6cd31ff6d5edbbfa3539986`。
+
+## 可选音频复核的网络调用
+
+Qwen-Omni 使用阿里云百炼托管服务，不随程序分发该模型权重。用户自行配置服务地址和 API Key，上传范围、计费与模型可用性以账号及 [服务文档](https://help.aliyun.com/zh/model-studio/qwen-omni) 为准。
+
+新增 HTTPX 0.28.1 及其传输依赖 httpcore 1.0.9、h11 0.16.0、AnyIO 4.16.0，用于有期限、可取消的音频上传和流式响应。版本固定在 Windows 锁文件。HTTPX 的来源与 BSD 许可见 [官方项目](https://github.com/encode/httpx)，异步使用方式见 [官方文档](https://www.python-httpx.org/async/)。TLS 证书沿用已安装的 certifi；不会关闭证书校验或自动跟随重定向。

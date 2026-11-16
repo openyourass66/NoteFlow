@@ -90,6 +90,76 @@ def test_toolbar_preserves_file_shortcuts_and_recent_projects(app, tmp_path, mon
         window.close()
 
 
+def test_audio_review_applies_checkpoint_and_can_undo_even_when_cancelled(app, window, tmp_path, monkeypatch):
+    from noteflow.review import ReviewIssue, Verdict, run_review
+    from noteflow.review_qwen import QwenConfig
+    from noteflow.review_ui import ReviewRequest
+    from noteflow.review import ReviewLimits
+    from noteflow.score import build_score, ScoreSettings
+
+    media = MediaInfo(tmp_path / "source.wav", 0, "pcm_s16le", "wav", 2)
+    baseline = (NoteEvent("lead", .1, 1, 62, .7, 80),)
+    fixed = (replace(baseline[0], midi=60),)
+    window._imported(media)
+    analysis = AnalysisResult(media, 2, baseline)
+    window._generated(desktop.GeneratedScore(analysis, build_score(baseline, ScoreSettings())))
+    config = QwenConfig("https://dashscope.aliyuncs.com/compatible-mode/v1", api_key="test-key")
+    class Dialog:
+        request = ReviewRequest(config, ReviewLimits(), 0, 2)
+        def __init__(self, *args):
+            pass
+        def exec(self):
+            return 1
+    monkeypatch.setattr(desktop, "ReviewDialog", Dialog)
+    monkeypatch.setattr(desktop, "show_report", lambda *args: None)
+    class Reviewer:
+        def assess(self, *args):
+            return Verdict("issues", (ReviewIssue(.1, 1, "pitch", "偏高"),))
+        def compare(self, a, b, *args):
+            return ("B" if b == fixed else "A"), "较好"
+    def operation(*args, cancel, **kwargs):
+        def checkpoint(result):
+            if result.accepted:
+                cancel.set()
+        return run_review(baseline, 2, Reviewer(), lambda *args: fixed,
+                          cancel=cancel, checkpoint=checkpoint)
+    monkeypatch.setattr(desktop, "review_score", operation)
+    window._sync_controls()
+    assert window.review_button.isEnabled()
+    window.review_button.click()
+    wait_for(app, lambda: window._thread is None)
+    assert window.score.melody == fixed
+    assert window._review_result.status == "cancelled"
+    assert window.review_report_action.isEnabled()
+    assert "test-key" not in str(window.settings.allKeys())
+    window.undo_button.click()
+    assert window.score.melody == baseline
+    window.redo_button.click()
+    assert window.score.melody == fixed
+    window._clear_session()
+    window._sync_controls()
+    assert not window.review_report_action.isEnabled()
+
+
+def test_review_configuration_does_not_save_credentials_and_requires_valid_range(app, tmp_path):
+    from noteflow.review_ui import ReviewDialog
+    settings = QSettings(str(tmp_path / "review.ini"), QSettings.Format.IniFormat)
+    dialog = ReviewDialog(None, settings, 60.1234)
+    dialog.url.setText("https://workspace-test.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
+    dialog.key.setText("test-secret-only")
+    dialog.start.setValue(10)
+    dialog.end.setValue(9)
+    dialog.submit()
+    assert dialog.request is None and dialog.error.text()
+    dialog.end.setValue(60.1234)
+    dialog.submit()
+    assert dialog.request.end_s <= 60.1234
+    assert dialog.request.config.api_key == "test-secret-only"
+    settings.sync()
+    assert "test-secret-only" not in (tmp_path / "review.ini").read_text(encoding="utf-8")
+    dialog.close()
+
+
 def test_desktop_generates_calibrates_and_exports(app, window, tmp_path, monkeypatch):
     source = tmp_path / "旋律 样本.wav"
     write_wave(source, 10, melody())

@@ -118,6 +118,7 @@ def _workflow_toolbar(w):
     w.save_as_action = _menu_action(w, menu, "项目另存为…", lambda: w.save_project(save_as=True), "Ctrl+Shift+S")
     menu.addSeparator()
     w.settings_action = menu.addAction("工具设置…", w.configure_tools)
+    w.review_report_action = menu.addAction("最近音频复核记录…", w.show_review_report)
     menu.addAction("使用说明", w.show_help)
     _menu_action(w, menu, "退出", w.close, "Ctrl+Q")
     more.setMenu(menu)
@@ -344,6 +345,9 @@ def _player(w):
         button.setToolTip(button.accessibleName())
     w.play_button.setToolTip("用当前音色演奏主旋律，保留原始节奏和停顿")
     transport.addWidget(track_group)
+    w.review_button = _button(transport, "音频复核…", w.review_audio, style="quiet")
+    w.review_button.setAccessibleName("云端音频复核")
+    w.review_button.setToolTip("实验功能：对照原曲和演奏进行有上限的云端复核，开始前设置范围与接口")
 
     w.timeline = QSlider(Qt.Orientation.Horizontal)
     w.timeline.setMinimumHeight(24)

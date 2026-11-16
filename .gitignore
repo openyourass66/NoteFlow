@@ -26,3 +26,8 @@ __pycache__/
 # Windows 生成的文件
 Thumbs.db
 Desktop.ini
+
+# 本机云端配置与凭据
+.env
+.env.*
+!.env.example

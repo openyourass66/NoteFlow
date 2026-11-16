@@ -33,6 +33,10 @@ from .notes import NoteEvent
 from .score import Score, ScoreSettings, build_score, rekey
 from .separation import Stems, separate
 from .synthesis import render_preview
+from .review import STATUS_TEXT
+from .review_service import review_score
+from .review_ui import ReviewDialog, show_report, show_calibration
+from .review_calibration import check_reviewer
 
 LOG = logging.getLogger("noteflow")
 
@@ -64,13 +68,15 @@ class Job(QObject):
         super().__init__()
         self.operation, self.cancel = operation, cancel
         self.outcome = None
+        self.keep_cancelled_result = False
 
     @Slot()
     def run(self):
         start = perf_counter()
         try:
             result = self.operation(self.cancel, self.progress.emit)
-            check_cancelled(self.cancel)
+            if not self.keep_cancelled_result:
+                check_cancelled(self.cancel)
             outcome = (result, None)
         except (Cancelled, NoteFlowError) as error:
             outcome = (None, error)
@@ -105,6 +111,8 @@ class MainWindow(QMainWindow):
         self._edited_notes = None
         self._undo, self._redo = [], []
         self._analysis_vocals = False
+        self._review_key = ""
+        self._review_result = self._review_report_path = None
         self._revision = 0
         self._thread = self._worker = self._cancel = self._callback = None
         self._pending_source = None
@@ -146,6 +154,8 @@ class MainWindow(QMainWindow):
         self.recent_list.setEnabled(not self._closing)
         self.open_button.setEnabled(not self._closing)
         self.settings_action.setEnabled(not busy)
+        self.review_button.setEnabled(ready and bool(self.score.melody) and not busy)
+        self.review_report_action.setEnabled(self._review_result is not None and not busy)
         self.generate_button.setEnabled(media_ready)
         self.open_project_button.setEnabled(not self._closing)
         self.save_button.setEnabled(media_ready)
@@ -188,13 +198,14 @@ class MainWindow(QMainWindow):
         if self._cancel and not self._cancel.is_set():
             self._status(text)
 
-    def _start(self, label, operation, callback):
+    def _start(self, label, operation, callback, *, keep_cancelled=False):
         if self._thread is not None:
             return
         self._cancel = Event()
         self._callback = callback
         self._thread = QThread(self)
         self._worker = Job(operation, self._cancel)
+        self._worker.keep_cancelled_result = keep_cancelled
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._job_progress)
@@ -212,6 +223,7 @@ class MainWindow(QMainWindow):
         self._thread.wait()
         cancelled = self._cancel.is_set()
         callback = self._callback
+        keep_cancelled = self._worker.keep_cancelled_result
         value, error = self._worker.outcome or (None, NoteFlowError("UNEXPECTED", "worker", "后台任务中断。"))
         self._thread.deleteLater()
         self._thread = self._worker = self._cancel = self._callback = None
@@ -227,7 +239,7 @@ class MainWindow(QMainWindow):
             path, self._pending_source = self._pending_source, None
             self.open_source(path)
             return
-        if cancelled or isinstance(error, Cancelled):
+        if (cancelled and not (keep_cancelled and value is not None)) or isinstance(error, Cancelled):
             self._remove_preview()
             self._status("任务已取消，可以重试。")
         elif error:
@@ -246,6 +258,50 @@ class MainWindow(QMainWindow):
 
     def configure_tools(self):
         self.tools = edit_tools(self, self.settings, self.tools)
+
+    def review_audio(self):
+        if self.score is None or self.analysis is None or self._thread is not None:
+            return
+        dialog = ReviewDialog(self, self.settings, self.analysis.duration_s, self._review_key)
+        if not dialog.exec():
+            return
+        request = dialog.request
+        self._review_key = request.config.api_key
+        self._stop_player()
+        analysis, score, tools = self.analysis, self.score, self.tools
+        folder = self.workdir / f"review-{uuid4().hex}"
+        if request.calibration:
+            def calibrate(cancel, progress):
+                return check_reviewer(tools, request.config, folder, send=True, cancel=cancel, progress=progress)
+            def calibrated(report):
+                self._status(f"复核能力检查结束，共请求 {report['calls']} 次；结果：{report['status']}。")
+                show_calibration(self, report)
+            self._start("正在准备已知旋律检查…", calibrate, calibrated, keep_cancelled=True)
+            return
+        use_stem = analysis.options.source == "separated" or (
+            analysis.options.source == "auto" and analysis.options.target == "vocal")
+        stem = None
+        if use_stem and self.stems:
+            stem = self.stems.vocals if analysis.options.target == "vocal" else self.stems.accompaniment
+
+        def operation(cancel, progress):
+            return review_score(analysis, score, tools, request.config, folder, limits=request.limits,
+                                start_s=request.start_s, end_s=request.end_s, stem=stem,
+                                cancel=cancel, progress=progress)
+
+        def finished(result):
+            self._review_result, self._review_report_path = result, folder / "report.json"
+            if result.notes != score.melody:
+                self._apply_notes(result.notes)
+            self._status(f"{STATUS_TEXT[result.status]}；请求 {result.calls} 次，采用 {result.accepted} 轮修改。")
+            self._sync_controls()
+            self.show_review_report()
+
+        self._start("正在准备音频复核…", operation, finished, keep_cancelled=True)
+
+    def show_review_report(self):
+        if self._review_result is not None:
+            show_report(self, self._review_result, self._review_report_path, self.score.melody if self.score else ())
 
     def choose_source(self):
         patterns = " ".join(f"*{suffix}" for suffix in MEDIA_SUFFIXES)
@@ -569,6 +625,7 @@ class MainWindow(QMainWindow):
             self._project_workspace.cleanup()
             self._project_workspace = None
         self.media = self.analysis = self.score = self.project_path = None
+        self._review_result = self._review_report_path = None
         self._edited_notes = None
         self._undo.clear()
         self._redo.clear()
