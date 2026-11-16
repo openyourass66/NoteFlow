@@ -94,3 +94,35 @@ def test_report_import_tolerates_sample_rate_rounding_at_media_end(tmp_path):
     save_report(replace(result, end_s=2.00002, events=(assessment,)), path)
     loaded = load_report(path, BASE, 2)
     assert loaded.end_s == 2 and latest_issues(loaded)[0].end_s == 2
+
+
+def test_cache_restores_recent_candidates_and_expires_old_files(tmp_path):
+    import os
+    from time import time
+    from noteflow.analysis import AnalysisResult
+    from noteflow.media import MediaInfo
+    from noteflow.review_cache import REVIEW_CACHE_SECONDS, is_recent, remember_report, remove_expired_reports, report_location
+
+    source = tmp_path / "song.wav"
+    source.write_bytes(b"audio")
+    analysis = AnalysisResult(MediaInfo(source, 0, "pcm_s16le", "wav", 2), 2, BASE)
+    directory = tmp_path / "review-records"
+    destination = report_location(directory, source, analysis)
+    assert destination is not None
+    report = tmp_path / "report.json"
+    save_report(rejected_result(), report)
+    remember_report(report, destination)
+    assert is_recent(destination)
+    restored = load_report(destination, FIXED, 2, cached=True)
+    assert restored.notes == BASE and restored.candidates == (CANDIDATE,)
+    data = json.loads(destination.read_text(encoding="utf-8"))
+    data["candidates"][0]["notes"][1]["midi"] = 99
+    destination.write_text(json.dumps(data), encoding="utf-8")
+    assert not load_report(destination, BASE, 2, cached=True).candidates
+    source.write_bytes(b"different audio at the same path")
+    assert report_location(directory, source, analysis) != destination
+    past = time() - REVIEW_CACHE_SECONDS - 1
+    os.utime(destination, (past, past))
+    assert not is_recent(destination)
+    remove_expired_reports(directory)
+    assert not destination.exists()

@@ -23,6 +23,7 @@ class ReviewReportDialog(QDialog):
     audition_requested = Signal(object, int)
     apply_requested = Signal(object)
     cancel_requested = Signal()
+    restart_requested = Signal()
 
     def __init__(self, parent, result, report_path, current_notes):
         super().__init__(parent)
@@ -125,6 +126,10 @@ class ReviewReportDialog(QDialog):
         self.details_toggle.setObjectName("quiet")
         self.details_toggle.toggled.connect(self._toggle_details)
         actions.addWidget(self.details_toggle)
+        self.restart = QPushButton("重新复核…")
+        self.restart.setObjectName("quiet")
+        self.restart.clicked.connect(self.restart_requested)
+        actions.addWidget(self.restart)
         actions.addStretch()
         self.prepare = QPushButton("生成候选")
         self.apply = QPushButton("应用到简谱")
@@ -182,6 +187,7 @@ class ReviewReportDialog(QDialog):
         self.apply.setVisible(bool(self.candidates))
         self.apply.setEnabled(not busy and self.candidate is not None)
         self.locate.setEnabled(not busy and self.issue_list.currentRow() >= 0)
+        self.restart.setEnabled(not busy and bool(self.current))
         self.export_button.setEnabled(not busy and bool(self.report_path))
         self.close_button.setText("取消任务" if busy else "关闭")
         self._playback_state(self.player.playbackState())

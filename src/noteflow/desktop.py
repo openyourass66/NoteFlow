@@ -34,6 +34,7 @@ from .score import Score, ScoreSettings, build_score, rekey
 from .separation import Stems, separate
 from .synthesis import render_preview
 from .review import STATUS_TEXT
+from .review_cache import is_recent, remember_report, remove_expired_reports, report_location
 from .review_edit import apply_manual, load_report, write_report
 from .review_service import prepare_audition, prepare_repairs, review_score
 from .review_results_ui import ReviewReportDialog
@@ -116,6 +117,9 @@ class MainWindow(QMainWindow):
         self._review_key = ""
         self._review_result = self._review_report_path = None
         self._review_dialog = None
+        self._review_cache_dir = cache / "review-records"
+        self._review_cache_path = None
+        remove_expired_reports(self._review_cache_dir)
         self._revision = 0
         self._thread = self._worker = self._cancel = self._callback = None
         self._pending_source = None
@@ -157,7 +161,9 @@ class MainWindow(QMainWindow):
         self.recent_list.setEnabled(not self._closing)
         self.open_button.setEnabled(not self._closing)
         self.settings_action.setEnabled(not busy)
-        self.review_button.setEnabled(ready and bool(self.score.melody) and not busy)
+        has_review = self._review_result is not None
+        self.review_button.setEnabled(ready and (bool(self.score.melody) or has_review) and not busy)
+        self.review_button.setToolTip("继续查看上次复核结果" if has_review else "对照原曲和演奏进行云端复核")
         self.review_report_action.setEnabled(self._review_result is not None and not busy)
         self.review_import_action.setEnabled(ready and not busy)
         self.generate_button.setEnabled(media_ready)
@@ -270,12 +276,20 @@ class MainWindow(QMainWindow):
         self.tools = edit_tools(self, self.settings, self.tools)
 
     def review_audio(self):
-        if self.score is None or self.analysis is None or self._thread is not None:
+        if self._review_result is not None:
+            self.show_review_report()
+        else:
+            self._start_audio_review()
+
+    def _start_audio_review(self):
+        if self.score is None or not self.score.melody or self.analysis is None or self._thread is not None:
             return
-        dialog = ReviewDialog(self, self.settings, self.analysis.duration_s, self._review_key)
+        dialog = ReviewDialog(self._review_dialog or self, self.settings, self.analysis.duration_s, self._review_key)
         if not dialog.exec():
             return
         request = dialog.request
+        if self._review_dialog is not None:
+            self._review_dialog.reject()
         self._review_key = request.config.api_key
         self._stop_player()
         analysis, score, tools = self.analysis, self.score, self.tools
@@ -297,12 +311,22 @@ class MainWindow(QMainWindow):
                                 cancel=cancel, progress=progress)
 
         def finished(result):
+            has_feedback = any(e["stage"] == "assess" for e in result.events)
+            if not has_feedback and self._review_result is not None:
+                self.show_review_report()
+                failure = next((e["summary"] for e in reversed(result.events) if e["stage"] == "error"),
+                               STATUS_TEXT[result.status])
+                self._status(f"{failure} 已保留上次复核记录。")
+                return
             self._review_result, self._review_report_path = result, folder / "report.json"
             if result.notes != score.melody:
                 self._apply_notes(result.notes)
             self._status(f"{STATUS_TEXT[result.status]}；请求 {result.calls} 次，采用 {result.accepted} 轮修改。")
+            saved = not has_feedback or self._cache_review()
             self._sync_controls()
             self.show_review_report()
+            if not saved:
+                self._status("复核记录暂存在本次会话，可从详情导出。")
 
         self._start("正在准备音频复核…", operation, finished, keep_cancelled=True)
 
@@ -320,6 +344,7 @@ class MainWindow(QMainWindow):
         dialog.apply_requested.connect(self._apply_review_candidate)
         dialog.locate_requested.connect(self._locate_review_issue)
         dialog.cancel_requested.connect(self.cancel_job)
+        dialog.restart_requested.connect(self._start_audio_review)
 
         def closed():
             self._review_dialog = None
@@ -360,8 +385,44 @@ class MainWindow(QMainWindow):
             self._status(str(error) if isinstance(error, ValueError) else "无法保存导入的复核记录。")
             return
         self._review_result, self._review_report_path = result, path
+        saved = self._cache_review()
         self._sync_controls()
         self.show_review_report()
+        if not saved:
+            self._status("导入的复核记录暂存在本次会话。")
+
+    def _review_location(self):
+        if self.score is None or self.analysis is None:
+            return None
+        return report_location(self._review_cache_dir, self.project_path or self.media.path,
+                               self.analysis, project=self.project_path is not None)
+
+    def _cache_review(self):
+        if self._review_cache_path is not None and self._review_report_path is not None:
+            try:
+                remember_report(self._review_report_path, self._review_cache_path)
+                return True
+            except OSError:
+                LOG.warning("无法保存本地音频复核缓存")
+        return False
+
+    def _restore_review(self):
+        path = self._review_location()
+        if path == self._review_cache_path:
+            return False
+        self._review_cache_path = path
+        self._review_result = self._review_report_path = None
+        if not is_recent(path):
+            return False
+        report = self.workdir / f"review-{uuid4().hex}" / "report.json"
+        try:
+            remember_report(path, report)
+            result = load_report(report, self.score.melody, self.analysis.duration_s, cached=True)
+        except (ValueError, OSError):
+            LOG.warning("无法恢复本地音频复核缓存")
+            return False
+        self._review_result, self._review_report_path = result, report
+        return True
 
     def _store_review_result(self, result):
         path = self._review_report_path or self.workdir / f"review-{uuid4().hex}" / "report.json"
@@ -371,6 +432,7 @@ class MainWindow(QMainWindow):
             self._status("无法保存复核记录，本次操作未应用，请检查磁盘可用空间。")
             return False
         self._review_result, self._review_report_path = result, path
+        self._cache_review()
         self._sync_controls()
         return True
 
@@ -510,6 +572,8 @@ class MainWindow(QMainWindow):
         self._show_media(self.analysis.duration_s)
         self._publish_score(result.score, calibrated=self.analysis.beat.reliable, notice=result.notice,
                             overlap=result.overlap_fraction)
+        if self._restore_review():
+            self._status(f"{self.status.text()} 可继续查看上次音频复核。")
         self._mark_dirty()
 
     def _publish_score(self, score, *, calibrated=True, notice="", overlap=None):
@@ -744,6 +808,7 @@ class MainWindow(QMainWindow):
             self._project_workspace = None
         self.media = self.analysis = self.score = self.project_path = None
         self._review_result = self._review_report_path = None
+        self._review_cache_path = None
         self._edited_notes = None
         self._undo.clear()
         self._redo.clear()
@@ -821,7 +886,10 @@ class MainWindow(QMainWindow):
             self._show_media(self.media.duration_s)
             self._update_title()
             self._remember_project(path)
-            self._status("项目已恢复，可以继续编辑和试听。")
+            if self._restore_review():
+                self._status("项目已恢复，可继续查看上次音频复核。")
+            else:
+                self._status("项目已恢复，可以继续编辑和试听。")
 
         self._start("正在打开项目…", lambda cancel, _: load_project(path, directory, cancel), loaded)
 
@@ -847,6 +915,8 @@ class MainWindow(QMainWindow):
 
         def saved(_):
             self.project_path = path.resolve()
+            self._review_cache_path = self._review_location()
+            self._cache_review()
             self._dirty = False
             self._update_title()
             self._remember_project(path)
@@ -1068,7 +1138,7 @@ class MainWindow(QMainWindow):
             "4. 演奏保留原始节奏，排谱校准不改变声音；点击音符可定位。\n"
             "5. Ctrl+S 保存项目。项目包含原曲、分轨和音符，可离线恢复。\n"
             "6. 音频复核结果中可直接对照试听，并应用候选到简谱。「查看详情」可定位音符。\n"
-            "7. 复核记录需单独导出；在更多菜单中可导入对应项目的记录，无需重新上传。\n\n"
+            "7. 上次复核结果在本机保留 7 天。再次点音频复核可继续查看，长期留存可导出记录。\n\n"
             "当前支持固定 4/4 拍、恒定速度和最长 120 秒片段。")
 
     def closeEvent(self, event):

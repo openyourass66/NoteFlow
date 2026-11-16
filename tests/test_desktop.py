@@ -160,6 +160,99 @@ def test_review_configuration_does_not_save_credentials_and_requires_valid_range
     dialog.close()
 
 
+def test_review_button_restores_candidates_after_reopening_project(app, window, tmp_path, monkeypatch):
+    from noteflow.review import RepairCandidate, ReviewIssue, ReviewLimits, Verdict, fingerprint, run_review, save_report
+    from noteflow.review_qwen import QwenConfig
+    from noteflow.review_ui import ReviewRequest
+    from noteflow.score import ScoreSettings, build_score
+
+    source = tmp_path / "music.wav"
+    write_wave(source, 2)
+    window.open_source(source)
+    wait_for(app, lambda: window._thread is None)
+    baseline = (NoteEvent("lead", .1, 1, 62, .7, 80),)
+    revised = (replace(baseline[0], midi=60),)
+    analysis = AnalysisResult(window.media, 2, baseline)
+    window._generated(desktop.GeneratedScore(analysis, build_score(baseline, ScoreSettings())))
+    window._sync_controls()
+    config = QwenConfig("https://dashscope.aliyuncs.com/compatible-mode/v1", api_key="session-only-key")
+    confirmations, calls = [], []
+
+    class ConfirmReview:
+        request = ReviewRequest(config, ReviewLimits(), 0, 2)
+        def __init__(self, *args):
+            pass
+        def exec(self):
+            confirmations.append(True)
+            return 1
+
+    class Reviewer:
+        def assess(self, *args):
+            return Verdict("issues", (ReviewIssue(.1, 1, "pitch", "偏高"),))
+        def compare(self, *args):
+            return "tie", "需要人工试听"
+
+    def review_score(analysis, score, tools, config, folder, **kwargs):
+        calls.append(True)
+        if len(calls) > 1:
+            class FailedReviewer:
+                def assess(self, *args):
+                    raise NoteFlowError("AUTH", "review", "认证失败。")
+            reviewer = FailedReviewer()
+        else:
+            reviewer = Reviewer()
+        result = run_review(score.melody, analysis.duration_s, reviewer, lambda *args: revised)
+        folder.mkdir()
+        save_report(result, folder / "report.json", model=config.model, usage={"total_tokens": 11})
+        return result
+
+    monkeypatch.setattr(desktop, "ReviewDialog", ConfirmReview)
+    monkeypatch.setattr(desktop, "review_score", review_score)
+    window.review_button.click()
+    wait_for(app, lambda: window._review_dialog is not None)
+    candidate = RepairCandidate(revised, fingerprint(baseline), 0, 2, "局部微调")
+    assert window._review_dialog.candidate == candidate
+    cache = window._review_cache_path
+    assert cache.is_file() and b"session-only-key" not in cache.read_bytes()
+
+    window._review_dialog.close_button.click()
+    window.review_button.click()
+    assert window._review_dialog.candidate == candidate and len(confirmations) == len(calls) == 1
+    window._review_dialog.restart.click()
+    wait_for(app, lambda: window._review_dialog is not None and window._thread is None)
+    assert len(confirmations) == len(calls) == 2 and window._review_dialog.candidate == candidate
+    assert "已保留上次复核记录" in window._review_dialog.status.text()
+    window._review_dialog.close_button.click()
+
+    project = tmp_path / "score.noteflow"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(project), ""))
+    window.save_project()
+    wait_for(app, lambda: window._thread is None)
+    project_cache = window._review_cache_path
+    assert project.is_file() and project_cache.is_file() and cache != project_cache
+    session_dir = window.workdir
+    window.close()
+    assert not session_dir.exists()
+
+    reopened = desktop.MainWindow(tmp_path, settings=window.settings, tools=window.tools)
+    monkeypatch.setattr(reopened, "_confirm_discard", lambda *args: True)
+    reopened.show()
+    try:
+        reopened.open_source(project)
+        wait_for(app, lambda: reopened._thread is None)
+        reopened.review_button.click()
+        assert reopened._review_dialog.candidate == candidate and reopened.score.melody == baseline
+        assert len(confirmations) == len(calls) == 2 and reopened._review_cache_path == project_cache
+        reopened._review_dialog.close_button.click()
+        reopened._apply_notes(revised)
+        reopened.review_button.click()
+        assert not reopened._review_dialog.apply.isVisible() and reopened._review_dialog.prepare.isVisible()
+        reopened._review_dialog.close_button.click()
+        reopened.undo()
+    finally:
+        reopened.close()
+
+
 def test_review_results_rebuild_audition_apply_undo_and_import(app, window, tmp_path, monkeypatch):
     from noteflow.review import RepairCandidate, RepairPlan, ReviewResult, fingerprint, save_report
     from noteflow.score import build_score, ScoreSettings
