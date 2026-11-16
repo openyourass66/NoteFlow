@@ -11,7 +11,7 @@ from .notes import NoteEvent
 from .options import AnalysisOptions, UncertainRegion
 from .process import check_cancelled
 from .rhythm import BeatEstimate, estimate
-from .separation import separate
+from .separation import Stems, separate
 from .transcription import refine_octaves, transcribe, transcribe_melody
 
 
@@ -45,6 +45,7 @@ def analyze_media(
     progress: Callable[[str], None] | None = None, vocals: Path | None = None,
     verify_pitch: bool = False, melody_only: bool = False,
     options: AnalysisOptions | None = None, pitch_python: str = "",
+    accompaniment_stems: Stems | None = None,
 ) -> AnalysisResult:
     with TemporaryDirectory(prefix="noteflow-", dir=workdir) as directory:
         directory = Path(directory)
@@ -58,8 +59,16 @@ def analyze_media(
         candidate_overlap = None
         isolated = (options.target == "vocal") if options else vocals is not None
         if melody_only:
+            guides = None
+            if accompaniment_stems and accompaniment_stems.bass and accompaniment_stems.other:
+                guides = tuple(
+                    normalize(MediaInfo(path, 0, "pcm_s16le", "wav"), directory, ffmpeg,
+                              cancel=cancel, filename=f"{name}.wav")
+                    for name, path in (("bass", accompaniment_stems.bass), ("other", accompaniment_stems.other))
+                )
             notes, candidate_overlap = transcribe_melody(audio, cancel, isolated=isolated,
-                                                       options=options, pitch_python=pitch_python)
+                                                       options=options, pitch_python=pitch_python,
+                                                       accompaniment_guides=guides)
         else:
             notes = transcribe(audio)
         check_cancelled(cancel)

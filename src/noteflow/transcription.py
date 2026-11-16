@@ -98,6 +98,7 @@ def transcribe_melody(
     audio: AudioAsset, cancel: Event | None = None, *, isolated: bool = False,
     options: AnalysisOptions | None = None,
     pitch_python: str = "",
+    accompaniment_guides: tuple[AudioAsset, AudioAsset] | None = None,
 ) -> tuple[tuple[NoteEvent, ...], float]:
     check_cancelled(cancel)
     output, candidates = _predict(audio, minimum_note_ms=50, cancel=cancel)
@@ -122,6 +123,18 @@ def transcribe_melody(
     pitch_attacks = _pitch_attacks(samples, SAMPLE_RATE, FFT_HOP, times[:-1], MIDI_OFFSET, frames.shape[1])
     candidate_melody = monophonic(candidates)
     competing = (len(candidates) - len(candidate_melody)) / max(1, len(candidates))
+    if not isolated and competing > 0.3 and accompaniment_guides and all(
+        guide.has_signal and guide.duration_s == audio.duration_s for guide in accompaniment_guides
+    ):
+        bass, other = (_predict(guide, minimum_note_ms=50, cancel=cancel)[0]
+                       for guide in accompaniment_guides)
+        allowed = slice(None)
+        if options:
+            allowed = slice(max(0, options.pitch_min - MIDI_OFFSET), options.pitch_max - MIDI_OFFSET + 1)
+        other_active = (other["note"][:, allowed] >= 0.40).any(axis=1)
+        if np.count_nonzero(other_active) >= 8:
+            frames = _accompaniment_evidence(frames, bass["note"], other["note"])
+            onsets = _accompaniment_evidence(onsets, bass["onset"], other["onset"])
     if pitch_python:
         from .pitch import estimate_pitch
         options = options or AnalysisOptions()
@@ -152,6 +165,16 @@ def transcribe_melody(
     notes = _convert_events(events, audio.duration_s)
     # A polyphonic fallback would silently put the accompaniment back in.
     return _require_notes(notes), competing
+
+
+def _accompaniment_evidence(mix, bass, other):
+    import numpy as np
+
+    # Matching bass activity is negative evidence only where the other instruments
+    # do not also support that pitch. A note need not sit in a fixed register.
+    bass_only = np.clip((bass - 0.22) / 0.58, 0, 1) * (1 - np.clip(other / 0.80, 0, 1))
+    remaining = mix * (1 - 0.85 * bass_only)
+    return remaining + 0.55 * np.maximum(other - remaining, 0)
 
 
 def _pitch_attacks(samples, sample_rate, hop, times, midi_offset, pitch_count):

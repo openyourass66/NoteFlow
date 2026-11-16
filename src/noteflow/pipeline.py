@@ -40,5 +40,6 @@ def run_pipeline(media, options: AnalysisOptions, *, ffmpeg="ffmpeg", demucs_pyt
             raise NoteFlowError("TRACK_UNAVAILABLE", "transcribe", "所选分轨不可用，请重新识别分轨。")
     analysis = analyze_media(media, ffmpeg=ffmpeg, find_beats=True, workdir=workdir,
                              cancel=cancel, progress=progress, vocals=source, verify_pitch=True,
-                             melody_only=True, options=options, pitch_python=pitch_python)
+                             melody_only=True, options=options, pitch_python=pitch_python,
+                             accompaniment_stems=stems if track == "accompaniment" else None)
     return PipelineResult(analysis, stems)
