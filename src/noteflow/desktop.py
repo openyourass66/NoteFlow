@@ -25,8 +25,9 @@ from .pipeline import run_pipeline
 from .desktop_settings import Tools, edit_tools, load_tools
 from .desktop_ui import build_interface, set_transport_paused
 from .errors import NoteFlowError
-from .export import PROGRAMS, export_score
-from .media import MEDIA_SUFFIXES, decode_original, probe
+from .export import AUTO_INSTRUMENT, PROGRAM_NAMES, PROGRAMS, export_score
+from .instruments import choose_program
+from .media import MEDIA_SUFFIXES, MediaInfo, decode_original, probe
 from .process import Cancelled, check_cancelled
 from .project import Project, load_project, save_project
 from .notes import NoteEvent
@@ -113,7 +114,6 @@ class MainWindow(QMainWindow):
         self._edited_notes = None
         self._undo, self._redo = [], []
         self._analysis_vocals = False
-        self._review_key = ""
         self._review_result = None
         self._review_dialog = None
         self._revision = 0
@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         self._pending_source = None
         self._closing = False
         self._preview_path = self._player = self._playing = None
+        self._auto_program = None
         self._playhead_ms = 0
         self._audio = QAudioOutput(self)
         self._audio.setVolume(0.65)
@@ -157,6 +158,7 @@ class MainWindow(QMainWindow):
         self.recent_list.setEnabled(not self._closing)
         self.open_button.setEnabled(not self._closing)
         self.settings_action.setEnabled(not busy)
+        self.cloud_settings_action.setEnabled(not busy)
         has_review = self._review_result is not None
         self.review_button.setEnabled(ready and (bool(self.score.melody) or has_review) and not busy)
         self.review_button.setToolTip("继续查看上次复核结果" if has_review else "对照原曲和演奏进行云端复核")
@@ -269,7 +271,14 @@ class MainWindow(QMainWindow):
             self._sync_controls()
 
     def configure_tools(self):
-        self.tools = edit_tools(self, self.settings, self.tools)
+        tools = edit_tools(self, self.settings, self.tools)
+        if tools != self.tools:
+            self.tools = tools
+            self._auto_program = None
+
+    def configure_review(self):
+        if ReviewDialog(self, self.settings).exec():
+            self._status("云端模型配置已保存到本机。")
 
     def review_audio(self):
         if self._review_result is not None:
@@ -280,13 +289,15 @@ class MainWindow(QMainWindow):
     def _start_audio_review(self):
         if self.score is None or not self.score.melody or self.analysis is None or self._thread is not None:
             return
-        dialog = ReviewDialog(self._review_dialog or self, self.settings, self.analysis.duration_s, self._review_key)
+        dialog = ReviewDialog(self._review_dialog or self, self.settings, self.analysis.duration_s)
         if not dialog.exec():
             return
         request = dialog.request
+        if request is None:
+            self._status("云端模型配置已保存到本机。")
+            return
         if self._review_dialog is not None:
             self._review_dialog.reject()
-        self._review_key = request.config.api_key
         self._stop_player()
         analysis, score, tools = self.analysis, self.score, self.tools
         folder = self.workdir / f"review-{uuid4().hex}"
@@ -504,6 +515,7 @@ class MainWindow(QMainWindow):
 
     def _generated(self, result: GeneratedScore):
         self._review_result = None
+        self._auto_program = None
         self.analysis = result.analysis
         if result.stems is not None:
             self.stems = result.stems
@@ -519,6 +531,8 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
 
     def _publish_score(self, score, *, calibrated=True, notice="", overlap=None):
+        if self.score is None or self.score.melody != score.melody:
+            self._auto_program = None
         self.score = score
         self.score_view.set_score(score)
         self._refresh_editor()
@@ -603,6 +617,29 @@ class MainWindow(QMainWindow):
         self._play_rendered(path, label)
         self._sync_controls()
 
+    def _instrument_task(self):
+        name = self.instrument.currentText()
+        selected = self._auto_program if name == AUTO_INSTRUMENT else (PROGRAMS[name], True)
+        score, media, tools, workdir = self.score, self.media, self.tools, self.workdir
+        stem = self._review_stem() if self.analysis is not None else None
+        if stem is not None:
+            media = MediaInfo(stem, 0, "pcm_s16le", "wav")
+
+        def resolve(cancel, progress):
+            if selected is not None:
+                return selected
+            if not tools.soundfont or score is None or not score.melody:
+                return 0, False
+            progress("正在匹配原曲主旋律音色…")
+            return choose_program(media, score.melody, Path(tools.soundfont).resolve(),
+                                  tools.ffmpeg, tools.fluidsynth, workdir, cancel)
+
+        return resolve
+
+    def _remember_auto_program(self, choice):
+        if self.instrument.currentText() == AUTO_INSTRUMENT and self.tools.soundfont:
+            self._auto_program = choice
+
     def play(self, *, original_timing=True):
         if self.score is None or self._thread is not None:
             return
@@ -611,16 +648,28 @@ class MainWindow(QMainWindow):
             self._status("请在工具设置中选择包含所需乐器的 SF2 音源。")
             self._sync_controls()
             return
-        score, program = self.score, PROGRAMS[self.instrument.currentText()]
+        score, resolve = self.score, self._instrument_task()
         synth, soundfont = self.tools.fluidsynth, Path(self.tools.soundfont).resolve()
         target = self.workdir / f"preview-{uuid4().hex}.wav"
         self._preview_path = target
-        label = "演奏"
-        self._start(f"正在渲染{label}…", lambda cancel, _: render_preview(
-            score, program, soundfont, target, synth, cancel, original_timing=original_timing),
-            lambda path: self._play_rendered(path, label))
+        def render(cancel, progress):
+            choice = resolve(cancel, progress)
+            progress("正在渲染演奏…")
+            return render_preview(score, choice[0], soundfont, target, synth, cancel,
+                                  original_timing=original_timing), choice
 
-    def _play_rendered(self, path, label):
+        def play_render(value):
+            path, choice = value
+            self._remember_auto_program(choice)
+            program, matched = choice
+            name = PROGRAM_NAMES.get(program, f"MIDI {program}")
+            if self.instrument.currentText() == AUTO_INSTRUMENT:
+                name += "（自动匹配）" if matched else "（默认音色）"
+            self._play_rendered(path, "演奏", detail=f" · {name}")
+
+        self._start("正在准备演奏…", render, play_render)
+
+    def _play_rendered(self, path, label, *, detail=""):
         player = QMediaPlayer(self)
         self._player = player
         self._playing = label
@@ -640,7 +689,7 @@ class MainWindow(QMainWindow):
             self.pause_button, state == QMediaPlayer.PlaybackState.PausedState) if self._player is player else None)
         player.errorOccurred.connect(lambda _code, _detail: self._playback_done(player, failed=True))
         player.mediaStatusChanged.connect(lambda state: self._playback_done(player) if state == QMediaPlayer.MediaStatus.EndOfMedia else None)
-        self._status(f"正在播放{label}…")
+        self._status(f"正在播放{label}{detail}…")
         player.setSource(QUrl.fromLocalFile(str(path)))
         if self._player is player:
             player.play()
@@ -710,12 +759,31 @@ class MainWindow(QMainWindow):
         overwrite = path.exists()
         if overwrite and QMessageBox.question(self, "覆盖文件", f"覆盖 {path.name}？") != QMessageBox.StandardButton.Yes:
             return
-        try:
-            export_score(self.score, PROGRAMS[self.instrument.currentText()], path, midi=midi, overwrite=overwrite)
-        except OSError:
-            self._status("导出失败，请检查写入权限或选择新的文件名。")
-        else:
+        score, resolve = self.score, self._instrument_task()
+
+        def write(cancel, progress):
+            choice = resolve(cancel, progress) if midi else None
+            check_cancelled(cancel)
+            try:
+                export_score(score, choice[0] if choice else 0, path, midi=midi, overwrite=overwrite)
+            except OSError as exc:
+                raise NoteFlowError("EXPORT_FAILED", "export", "导出失败，请检查写入权限或选择新的文件名。") from exc
+            return choice
+
+        def written(choice):
+            if choice is not None:
+                self._remember_auto_program(choice)
             self._status(f"已导出 {path.name}。")
+
+        if midi:
+            self._start("正在导出 MIDI…", write, written)
+        else:
+            try:
+                write(None, None)
+            except NoteFlowError as error:
+                self._status(str(error))
+            else:
+                written(None)
 
     def _update_title(self):
         title = self.project_path.stem if self.project_path else Path(self.source_name).stem
@@ -749,6 +817,8 @@ class MainWindow(QMainWindow):
             self._project_workspace.cleanup()
             self._project_workspace = None
         self.media = self.analysis = self.score = self.project_path = None
+        self._auto_program = None
+        self.instrument.setCurrentText(AUTO_INSTRUMENT)
         self._review_result = None
         self._edited_notes = None
         self._undo.clear()
@@ -1051,31 +1121,38 @@ class MainWindow(QMainWindow):
         if path.exists() and QMessageBox.question(self, "覆盖文件", f"覆盖 {path.name}？") != QMessageBox.StandardButton.Yes:
             return
         score, stems, tools = self.score, self.stems, self.tools
-        program = PROGRAMS[self.instrument.currentText()]
+        resolve = self._instrument_task() if kind == "演奏" else None
 
-        def write(cancel, _):
+        def write(cancel, progress):
+            choice = resolve(cancel, progress) if resolve else None
             with TemporaryDirectory(prefix="export-", dir=path.parent) as directory:
                 target = Path(directory) / "audio.wav"
                 if kind in ("人声", "伴奏"):
                     shutil.copyfile(stems.vocals if kind == "人声" else stems.accompaniment, target)
                 else:
-                    render_preview(score, program, Path(tools.soundfont), target, tools.fluidsynth,
+                    render_preview(score, choice[0], Path(tools.soundfont), target, tools.fluidsynth,
                                    cancel, original_timing=True)
                 check_cancelled(cancel)
                 os.replace(target, path)
+            return choice
 
-        self._start("正在导出音频…", write, lambda _: self._status(f"已导出 {path.name}。"))
+        def written(choice):
+            if choice is not None:
+                self._remember_auto_program(choice)
+            self._status(f"已导出 {path.name}。")
+
+        self._start("正在导出音频…", write, written)
 
     def show_help(self):
         QMessageBox.information(self, "使用说明",
             "1. 导入音频或视频，选择乐器或人声主旋律，再生成简谱。\n"
             "2. 自动选源：乐器使用原曲，人声先分离。也可直接识别清唱或独奏。\n"
             "3. 在音符编辑页修正音高、起止时间和力度，Ctrl+Z 可撤销。\n"
-            "4. 演奏保留原始节奏，排谱校准不改变声音；点击音符可定位。\n"
+            "4. 演奏保留原始节奏，音色默认匹配原曲，也可手动选择；点击音符可定位。\n"
             "5. Ctrl+S 保存项目。项目包含原曲、分轨和音符，可离线恢复。\n"
             "6. 音频复核结果中可直接对照试听，并应用候选到简谱。「查看详情」可定位音符。\n"
             "7. 复核结果保留到本次使用结束。关闭结果窗口后，再次点音频复核即可继续。\n\n"
-            "当前支持固定 4/4 拍、恒定速度和最长 120 秒片段。")
+            "媒体文件最大 1 GB，音轨最长 120 秒。简谱采用固定 4/4 拍和恒定速度。")
 
     def closeEvent(self, event):
         if self._thread is not None:

@@ -12,7 +12,7 @@ from .process import check_cancelled, run_tool
 
 SAMPLE_RATE = 22050
 MAX_SECONDS = 120
-MAX_BYTES = 200_000_000
+MAX_BYTES = 1_000_000_000
 FORMATS = {"wav": "pcm_", "mp3": "mp3", "mov": "aac"}
 MEDIA_SUFFIXES = (".wav", ".mp3", ".mp4", ".m4a")
 
@@ -57,7 +57,7 @@ def probe(path: Path, ffprobe: str = "ffprobe", *, cancel: Event | None = None) 
     if path.suffix.lower() not in MEDIA_SUFFIXES:
         raise NoteFlowError("UNSUPPORTED_MEDIA", "probe", "请选择 PCM WAV、MP3 或含 AAC 音轨的 MP4 / M4A。")
     if size > MAX_BYTES:
-        raise NoteFlowError("INPUT_LIMIT", "probe", "文件超过 200 MB，请截取片段后重试。")
+        raise NoteFlowError("INPUT_LIMIT", "probe", "文件超过 1 GB，请截取片段后重试。")
 
     output = run_tool(ffprobe, "probe", 15, (
         "-v", "error", "-protocol_whitelist", "file", "-format_whitelist", ",".join(FORMATS),

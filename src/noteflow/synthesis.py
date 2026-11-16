@@ -22,23 +22,24 @@ def _chunks(stream, end):
         stream.seek(stop + (size & 1))
 
 
-def _has_preset(path: Path, program: int) -> bool:
+def soundfont_programs(path: Path) -> frozenset[int]:
     with path.open("rb") as stream:
         header, size, form = struct.unpack("<4sI4s", stream.read(12))
         if (header, form) != (b"RIFF", b"sfbk") or size + 8 > path.stat().st_size:
-            return False
+            return frozenset()
         for name, stop in _chunks(stream, size + 8):
             if name != b"LIST" or stream.read(4) != b"pdta":
                 continue
             for child, child_stop in _chunks(stream, stop):
                 if child != b"phdr":
                     continue
-                while stream.tell() + 76 <= child_stop:
+                programs = set()
+                while stream.tell() + 76 <= child_stop:  # The final record is the terminal header.
                     _, preset, bank, *_ = struct.unpack("<20sHHHIII", stream.read(38))
-                    if bank == 0 and preset == program:
-                        return True
-                return False
-    return False
+                    if bank == 0 and 0 <= preset <= 127:
+                        programs.add(preset)
+                return frozenset(programs)
+    return frozenset()
 
 
 def render_preview(
@@ -47,7 +48,7 @@ def render_preview(
 ) -> Path:
     check_cancelled(cancel)
     try:
-        available = _has_preset(soundfont, program)
+        available = program in soundfont_programs(soundfont)
     except (OSError, ValueError, struct.error):
         available = False
     if not available:

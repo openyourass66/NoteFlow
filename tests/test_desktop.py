@@ -92,7 +92,7 @@ def test_toolbar_preserves_file_shortcuts_and_recent_projects(app, tmp_path, mon
 
 def test_audio_review_applies_checkpoint_and_can_undo_even_when_cancelled(app, window, tmp_path, monkeypatch):
     from noteflow.review import ReviewIssue, Verdict, run_review
-    from noteflow.review_qwen import QwenConfig
+    from noteflow.review_cloud import CloudConfig
     from noteflow.review_ui import ReviewRequest
     from noteflow.review import ReviewLimits
     from noteflow.score import build_score, ScoreSettings
@@ -103,7 +103,7 @@ def test_audio_review_applies_checkpoint_and_can_undo_even_when_cancelled(app, w
     window._imported(media)
     analysis = AnalysisResult(media, 2, baseline)
     window._generated(desktop.GeneratedScore(analysis, build_score(baseline, ScoreSettings())))
-    config = QwenConfig("https://dashscope.aliyuncs.com/compatible-mode/v1", api_key="test-key")
+    config = CloudConfig("https://dashscope.aliyuncs.com/compatible-mode/v1", api_key="test-key")
     class Dialog:
         request = ReviewRequest(config, ReviewLimits(), 0, 2)
         def __init__(self, *args):
@@ -141,7 +141,8 @@ def test_audio_review_applies_checkpoint_and_can_undo_even_when_cancelled(app, w
     assert not window.review_report_action.isEnabled()
 
 
-def test_review_configuration_does_not_save_credentials_and_requires_valid_range(app, tmp_path):
+@pytest.mark.skipif(os.name != "nt", reason="Local key protection uses Windows DPAPI")
+def test_review_configuration_persists_key_encrypted_and_requires_valid_range(app, tmp_path):
     from noteflow.review_ui import ReviewDialog
     settings = QSettings(str(tmp_path / "review.ini"), QSettings.Format.IniFormat)
     dialog = ReviewDialog(None, settings, 60.1234)
@@ -159,11 +160,61 @@ def test_review_configuration_does_not_save_credentials_and_requires_valid_range
     assert "test-secret-only" not in (tmp_path / "review.ini").read_text(encoding="utf-8")
     dialog.close()
 
+    reopened = ReviewDialog(None, QSettings(settings.fileName(), QSettings.Format.IniFormat))
+    assert reopened.url.text() == dialog.url.text()
+    assert reopened.key.text() == "test-secret-only"
+    assert reopened.key.echoMode() == reopened.key.EchoMode.Password
+    reopened.url.setText("https://gateway.example.com/v1")
+    assert not reopened.key.text()
+    reopened.model.setCurrentText("vendor/custom-audio")
+    reopened.save()
+    assert reopened.request is None
+    saved = ReviewDialog(None, QSettings(settings.fileName(), QSettings.Format.IniFormat), 5)
+    assert saved.url.text() == "https://gateway.example.com/v1"
+    assert saved.model.currentText() == "vendor/custom-audio"
+    assert not saved.key.text()
+
+
+def test_auto_timbre_is_used_by_playback_and_export_with_manual_override(app, window, tmp_path, monkeypatch):
+    import mido
+    from noteflow.score import ScoreSettings, build_score
+
+    media = MediaInfo(tmp_path / "source.wav", 0, "pcm_s16le", "wav", 2)
+    notes = (NoteEvent("lead", .1, 1, 62, .7, 80),)
+    window._imported(media)
+    window._generated(desktop.GeneratedScore(AnalysisResult(media, 2, notes), build_score(notes, ScoreSettings())))
+    window.tools = replace(window.tools, soundfont=str(tmp_path / "test.sf2"))
+    detected, rendered = [], []
+    monkeypatch.setattr(desktop, "choose_program", lambda *args: (detected.append(args[0]) or 65, True))
+
+    def render(score, program, soundfont, target, *args, **kwargs):
+        rendered.append(program)
+        return target
+
+    monkeypatch.setattr(desktop, "render_preview", render)
+    monkeypatch.setattr(window, "_play_rendered", lambda *args, **kwargs: kwargs)
+    assert window.instrument.currentText() == "自动"
+    window.play()
+    wait_for(app, lambda: window._thread is None)
+    assert detected == [media] and rendered == [65]
+
+    target = tmp_path / "auto.mid"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(target), ""))
+    window.export(True)
+    wait_for(app, lambda: window._thread is None)
+    program = next(message.program for message in mido.MidiFile(target).tracks[0] if message.type == "program_change")
+    assert detected == [media] and program == 65
+
+    window.instrument.setCurrentText("钢琴")
+    window.play()
+    wait_for(app, lambda: window._thread is None)
+    assert detected == [media] and rendered == [65, 0]
+
 
 def test_review_button_keeps_candidates_only_until_app_exit(app, window, tmp_path, monkeypatch):
     import json
     from noteflow.review import RepairCandidate, ReviewIssue, ReviewLimits, Verdict, fingerprint, run_review
-    from noteflow.review_qwen import QwenConfig
+    from noteflow.review_cloud import CloudConfig
     from noteflow.review_ui import ReviewRequest
     from noteflow.score import ScoreSettings, build_score
 
@@ -176,7 +227,7 @@ def test_review_button_keeps_candidates_only_until_app_exit(app, window, tmp_pat
     analysis = AnalysisResult(window.media, 2, baseline)
     window._generated(desktop.GeneratedScore(analysis, build_score(baseline, ScoreSettings())))
     window._sync_controls()
-    config = QwenConfig("https://dashscope.aliyuncs.com/compatible-mode/v1", api_key="session-only-key")
+    config = CloudConfig("https://dashscope.aliyuncs.com/compatible-mode/v1", api_key="session-only-key")
     confirmations, calls = [], []
 
     class ConfirmReview:
@@ -359,6 +410,7 @@ def test_desktop_generates_calibrates_and_exports(app, window, tmp_path, monkeyp
         monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (str(path), ""))
         assert action.isEnabled()
         action.trigger()
+        wait_for(app, lambda: window._thread is None)
         assert path.is_file(), window.status.text()
     assert (tmp_path / "导出.txt").read_text(encoding="utf-8") == to_text(window.score)
     assert mido.MidiFile(tmp_path / "导出.mid").tracks[0][2].key == "D"

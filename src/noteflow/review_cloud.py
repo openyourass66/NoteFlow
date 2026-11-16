@@ -1,9 +1,10 @@
-"""Qwen-Omni audio review through the documented streaming HTTP endpoint."""
+"""Audio review through OpenAI-compatible Chat Completions."""
 
 import asyncio
 import base64
 import contextlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from time import monotonic
@@ -16,29 +17,66 @@ from .process import check_cancelled
 from .review import parse_preference, parse_verdict
 
 DEFAULT_MODEL = "qwen3.8-omni-flash"
+PROTOCOLS = ("auto", "openai", "dashscope")
+
+
+def is_dashscope(base_url: str) -> bool:
+    try:
+        host = urlsplit(base_url).hostname or ""
+    except ValueError:
+        return False
+    return (host in {"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com"}
+            or re.fullmatch(r"[a-z0-9-]+\.[a-z0-9-]+\.maas\.aliyuncs\.com", host) is not None)
+
+
+def environment_key(base_url: str) -> str:
+    environment_url = os.environ.get("NOTEFLOW_REVIEW_BASE_URL", "").strip().rstrip("/")
+    if environment_url == base_url:
+        key = os.environ.get("NOTEFLOW_REVIEW_API_KEY", "")
+        if key:
+            return key
+    return os.environ.get("DASHSCOPE_API_KEY", "") if is_dashscope(base_url) else ""
 
 
 @dataclass(frozen=True, slots=True)
-class QwenConfig:
+class CloudConfig:
     base_url: str
     model: str = DEFAULT_MODEL
     api_key: str = field(default="", repr=False)
+    protocol: str = "auto"
 
-    def validate(self):
-        parts = urlsplit(self.base_url)
-        host = parts.hostname or ""
-        # This adapter sends music and credentials only to the configured Alibaba
-        # endpoint. No redirects, third-party gateways or plain HTTP fallback.
-        official = (host in {"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com"}
-                    or re.fullmatch(r"[a-z0-9-]+\.[a-z0-9-]+\.maas\.aliyuncs\.com", host))
-        if (parts.scheme != "https" or not official or parts.port not in (None, 443)
-                or parts.username or parts.password or parts.query or parts.fragment
-                or parts.path.rstrip("/") != "/compatible-mode/v1"):
-            raise ValueError("请填写百炼控制台的 HTTPS Base URL，以 /compatible-mode/v1 结尾。")
-        if not re.fullmatch(r"qwen(?:2\.5|3(?:\.5|\.8)?)-omni-[a-z0-9-]+", self.model) or "realtime" in self.model:
-            raise ValueError("请选择支持音频输入的 Qwen-Omni HTTP 模型。")
-        if not self.api_key.strip() or any(c.isspace() for c in self.api_key):
-            raise ValueError("请在本机填写百炼 API Key，或设置 DASHSCOPE_API_KEY。")
+    @property
+    def dashscope(self):
+        return self.protocol == "dashscope" or (self.protocol == "auto" and is_dashscope(self.base_url))
+
+    @property
+    def endpoint(self):
+        base = self.base_url.rstrip("/")
+        return base if base.endswith("/chat/completions") else base + "/chat/completions"
+
+    def validate(self, *, require_key=True):
+        try:
+            parts = urlsplit(self.base_url)
+            url = httpx.URL(self.base_url)
+            if (parts.scheme != "https" or url.scheme != "https" or not parts.hostname
+                    or parts.hostname != url.host or "@" in parts.netloc
+                    or any(c in self.base_url for c in "?#\\{}<>")
+                    or any(c.isspace() or ord(c) < 32 for c in self.base_url)):
+                raise ValueError
+            _ = parts.port
+        except (ValueError, httpx.InvalidURL):
+            raise ValueError("请填写服务商提供的 HTTPS Base URL，或完整的 Chat Completions 接口地址。") from None
+        if not self.model or self.model != self.model.strip():
+            raise ValueError("请填写服务商提供的音频模型名称。")
+        if self.protocol not in PROTOCOLS:
+            raise ValueError("请选择服务商支持的音频接口格式。")
+        if (require_key and not self.api_key) or any(not 33 <= ord(c) <= 126 for c in self.api_key):
+            raise ValueError("请填写有效的 API Key。")
+
+
+def _usage(data):
+    return {k: v for k, v in (data.get("usage") or {}).items()
+            if k in ("prompt_tokens", "completion_tokens", "total_tokens") and type(v) is int and v >= 0}
 
 
 def _events(chunks):
@@ -67,8 +105,7 @@ def read_completion(chunks):
         if not isinstance(data, dict) or data.get("error"):
             raise ValueError("Remote error")
         if data.get("usage"):
-            usage = {k: v for k, v in data["usage"].items()
-                     if k in ("prompt_tokens", "completion_tokens", "total_tokens") and type(v) is int and v >= 0}
+            usage = _usage(data)
         for choice in data.get("choices", []):
             if choice.get("index", 0) != 0:
                 continue
@@ -77,7 +114,10 @@ def read_completion(chunks):
                 if finish != "stop":
                     raise ValueError("Incomplete or refused response")
                 stopped = True
-            text = choice.get("delta", {}).get("content")
+            delta = choice.get("delta", {})
+            if delta.get("refusal"):
+                raise ValueError("Refused response")
+            text = delta.get("content")
             if text is not None:
                 if not isinstance(text, str):
                     raise ValueError("Invalid text delta")
@@ -88,39 +128,58 @@ def read_completion(chunks):
     return "".join(content), usage
 
 
-def request(config: QwenConfig, audio: bytes, prompt: str, cancel=None):
+def _read_json_completion(chunks):
+    data = json.loads(b"".join(chunks))
+    if data.get("error"):
+        raise ValueError("Remote error")
+    choice = next((choice for choice in data["choices"] if choice.get("index", 0) == 0), {})
+    message = choice.get("message", {})
+    text = message.get("content")
+    if choice.get("finish_reason") != "stop" or message.get("refusal") or not isinstance(text, str) or not text:
+        raise ValueError("Incomplete or refused response")
+    return text, _usage(data)
+
+
+def request(config: CloudConfig, audio: bytes, prompt: str, cancel=None):
     config.validate()
     check_cancelled(cancel)
     encoded = base64.b64encode(audio).decode("ascii")
     if len(encoded) >= 10_000_000:
         raise NoteFlowError("REVIEW_INPUT", "review", "音频片段超过云端大小限制，请缩小复核范围。")
+    if config.dashscope:
+        encoded = f"data:audio/wav;base64,{encoded}"
     payload = {"model": config.model, "modalities": ["text"], "stream": True,
-               "stream_options": {"include_usage": True}, "max_tokens": 4096,
                "messages": [{"role": "user", "content": [
-                   {"type": "input_audio", "input_audio": {"data": f"data:audio/wav;base64,{encoded}", "format": "wav"}},
+                   {"type": "input_audio", "input_audio": {"data": encoded, "format": "wav"}},
                    {"type": "text", "text": prompt},
                ]}]}
-    if config.model.startswith("qwen3.8-"):
-        payload["reasoning_effort"] = "none"
-        payload["response_format"] = {"type": "json_object"}
-    elif config.model.startswith("qwen3-"):
-        payload["enable_thinking"] = False
+    if config.dashscope:
+        payload.update(stream_options={"include_usage": True}, max_tokens=4096)
+        if config.model.startswith("qwen3.8-"):
+            payload.update(reasoning_effort="none", response_format={"type": "json_object"})
+        elif config.model.startswith("qwen3-"):
+            payload["enable_thinking"] = False
+    else:
+        payload["max_completion_tokens"] = 4096
+
     async def transfer():
         # No automatic retries, redirects, environment proxies or background
         # request left running after cancellation. Closing the async stream owns
         # and releases its socket on Windows as well as other platforms.
         async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15), follow_redirects=False,
                                      trust_env=False) as client:
-            async with client.stream("POST", config.base_url.rstrip("/") + "/chat/completions",
+            async with client.stream("POST", config.endpoint,
                                      json=payload, headers={"Authorization": f"Bearer {config.api_key}",
-                                                            "Accept": "text/event-stream"}) as response:
+                                                            "Accept": "text/event-stream, application/json"}) as response:
                 if response.status_code != 200:
-                    messages = {401: "API Key 或地域不匹配", 403: "账号没有模型权限", 404: "接口或模型不存在",
-                                429: "超过额度或调用频率"}
+                    messages = {400: "请检查模型是否支持 WAV 音频输入和所选接口格式",
+                                401: "请检查 API Key 和服务地址", 403: "账号没有模型权限",
+                                404: "接口或模型不存在", 429: "超过额度或调用频率"}
                     message = messages.get(response.status_code, "服务暂时不可用或请求参数不被支持")
                     raise NoteFlowError("REVIEW_HTTP", "review", f"云端复核失败（HTTP {response.status_code}）：{message}。未自动重试。")
-                if "text/event-stream" not in response.headers.get("content-type", "").lower():
-                    raise ValueError("Expected SSE response")
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                if content_type not in ("text/event-stream", "application/json"):
+                    raise ValueError("Unexpected response type")
                 chunks, total, tail = [], 0, b""
                 async for chunk in response.aiter_bytes():
                     total += len(chunk)
@@ -128,10 +187,10 @@ def request(config: QwenConfig, audio: bytes, prompt: str, cancel=None):
                         raise ValueError("Oversized response")
                     chunks.append(chunk)
                     tail = tail + chunk
-                    if b"data: [DONE]\n" in tail or b"data: [DONE]\r\n" in tail:
+                    if content_type == "text/event-stream" and (b"data: [DONE]\n" in tail or b"data: [DONE]\r\n" in tail):
                         break
                     tail = tail[-32:]
-                return read_completion(chunks)
+                return read_completion(chunks) if content_type == "text/event-stream" else _read_json_completion(chunks)
 
     async def cancellable():
         task = asyncio.create_task(transfer())
@@ -160,7 +219,7 @@ def request(config: QwenConfig, audio: bytes, prompt: str, cancel=None):
         raise NoteFlowError("REVIEW_RESPONSE", "review", "云端回复不完整或格式无效，未用于修改。") from exc
 
 
-class QwenReviewer:
+class CloudReviewer:
     def __init__(self, config, audio, target, cancel=None):
         self.config, self.audio, self.target, self.cancel = config, audio, target, cancel
         self.usage = {}

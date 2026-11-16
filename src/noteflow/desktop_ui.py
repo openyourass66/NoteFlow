@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from .desktop_theme import COLORS, ICON_SIZE, ComboBox, apply_theme, icon
-from .export import PROGRAMS
+from .export import AUTO_INSTRUMENT, PROGRAMS
 from .media import MEDIA_SUFFIXES
 from .score import BPM_MAX, BPM_MIN, KEYS
 from .score_view import ScoreView
@@ -118,6 +118,7 @@ def _workflow_toolbar(w):
     w.save_as_action = _menu_action(w, menu, "项目另存为…", lambda: w.save_project(save_as=True), "Ctrl+Shift+S")
     menu.addSeparator()
     w.settings_action = menu.addAction("工具设置…", w.configure_tools)
+    w.cloud_settings_action = menu.addAction("云端模型设置…", w.configure_review)
     w.review_report_action = menu.addAction("最近音频复核记录…", w.show_review_report)
     w.review_import_action = menu.addAction("导入复核记录…", w.choose_review_report)
     menu.addAction("使用说明", w.show_help)
@@ -185,7 +186,7 @@ def _start_page(w):
     w.start_open_project = _button(actions, "打开项目", w.choose_project, height=38, glyph="folder")
     actions.addStretch()
     content.addLayout(actions)
-    formats = QLabel(" · ".join(suffix[1:].upper() for suffix in MEDIA_SUFFIXES))
+    formats = QLabel(" · ".join(suffix[1:].upper() for suffix in MEDIA_SUFFIXES) + "  |  最大 1 GB · 120 秒")
     formats.setObjectName("caption")
     content.addWidget(formats)
 
@@ -360,7 +361,9 @@ def _player(w):
     transport.addWidget(w.time_label)
     transport.addWidget(_divider(Qt.Orientation.Vertical))
     w.instrument = ComboBox()
-    w.instrument.addItems(PROGRAMS)
+    w.instrument.addItems((AUTO_INSTRUMENT, *PROGRAMS))
+    w.instrument.setAccessibleName("演奏音色")
+    w.instrument.setToolTip("自动匹配原曲主旋律的音色，也可手动选择。")
     _field(transport, "音色", w.instrument)
     w.instrument.currentIndexChanged.connect(w._change_instrument)
     w.rate = ComboBox()

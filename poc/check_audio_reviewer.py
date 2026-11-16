@@ -8,7 +8,7 @@ from tempfile import mkdtemp
 
 from noteflow.desktop_settings import _default_tools
 from noteflow.review_calibration import check_reviewer
-from noteflow.review_qwen import DEFAULT_MODEL, QwenConfig
+from noteflow.review_cloud import CloudConfig, DEFAULT_MODEL, PROTOCOLS, environment_key
 
 
 def main():
@@ -16,9 +16,12 @@ def main():
     parser.add_argument("--output", type=Path, default=Path(".poc-output/audio-review-calibration"))
     parser.add_argument("--base-url", default=os.environ.get("NOTEFLOW_REVIEW_BASE_URL", ""))
     parser.add_argument("--model", default=os.environ.get("NOTEFLOW_REVIEW_MODEL", DEFAULT_MODEL))
+    parser.add_argument("--protocol", choices=PROTOCOLS, default="auto")
     parser.add_argument("--send", action="store_true", help="上传合成测试音频，最多6次付费请求；默认只本地准备")
     args = parser.parse_args()
-    config = QwenConfig(args.base_url, args.model, os.environ.get("DASHSCOPE_API_KEY", ""))
+    url = args.base_url.strip().rstrip("/")
+    key = os.environ.get("NOTEFLOW_REVIEW_API_KEY") or environment_key(url)
+    config = CloudConfig(url, args.model, key, args.protocol)
     if args.send:
         try:
             config.validate()

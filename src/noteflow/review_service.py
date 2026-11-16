@@ -8,7 +8,7 @@ from .review_audio import ReviewAudio
 from .review_audio import wav_bytes
 from .review_edit import candidate_notes
 from .media import MediaInfo, normalize
-from .review_qwen import QwenReviewer
+from .review_cloud import CloudReviewer
 from .review_repair import LocalRepair, collect_evidence
 
 
@@ -20,7 +20,7 @@ def review_score(analysis, score, tools, config, folder, *, limits, start_s, end
     if progress:
         progress("正在准备原曲与钢琴演奏对照…")
     audio = ReviewAudio(analysis.media, score.settings, tools, folder / "audio", cancel)
-    reviewer = QwenReviewer(config, audio, analysis.options.target, cancel)
+    reviewer = CloudReviewer(config, audio, analysis.options.target, cancel)
 
     def evidence(flag):
         return collect_evidence(audio.evidence_audio(stem), analysis.options, tools.pitch_python, flag)

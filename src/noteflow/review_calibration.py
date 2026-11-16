@@ -11,7 +11,7 @@ from .media import MediaInfo
 from .notes import NoteEvent
 from .process import Cancelled, check_cancelled
 from .review_audio import RATE, ReviewAudio, wav_bytes
-from .review_qwen import QwenReviewer
+from .review_cloud import CloudReviewer
 from .score import ScoreSettings
 
 
@@ -62,7 +62,7 @@ def check_reviewer(tools, config, folder, *, send=False, retain_artifacts=True, 
     if not send:
         return report
     config.validate()
-    reviewer = QwenReviewer(config, audio, "instrument", cancel)
+    reviewer = CloudReviewer(config, audio, "instrument", cancel)
     try:
         for name, notes, kinds in (("clean", clean, None), ("pitch", pitch, {"pitch"}),
                                    ("octave", octave, {"octave", "pitch"}),

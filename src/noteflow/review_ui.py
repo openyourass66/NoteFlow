@@ -1,6 +1,5 @@
 """Native controls for explicit, bounded cloud audio review."""
 
-import os
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
@@ -9,13 +8,15 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout,
 )
 
+from .desktop_theme import ComboBox
 from .review import ReviewLimits
-from .review_qwen import DEFAULT_MODEL, QwenConfig
+from .review_cloud import CloudConfig, DEFAULT_MODEL
+from .review_settings import load_connection, save_connection
 
 
 @dataclass(frozen=True, slots=True)
 class ReviewRequest:
-    config: QwenConfig
+    config: CloudConfig
     limits: ReviewLimits
     start_s: float
     end_s: float
@@ -23,36 +24,92 @@ class ReviewRequest:
 
 
 class ReviewDialog(QDialog):
-    def __init__(self, parent, settings, duration, api_key=""):
+    def __init__(self, parent, settings, duration=None):
         super().__init__(parent)
         self.settings, self.request = settings, None
         self.duration = duration
-        self.setWindowTitle("音频复核 · 实验功能")
+        is_review = duration is not None
+        self.setWindowTitle("音频复核 · 实验功能" if is_review else "云端模型设置")
         self.setMinimumWidth(610)
         layout = QVBoxLayout(self)
-        intro = QLabel("对照原曲和钢琴演奏，复核音高、节奏与连贯性。\n只采用有本地证据且前后对照一致支持的修改；可随时取消并撤销修改。")
+        intro = QLabel("对照原曲和钢琴演奏，复核音高、节奏与连贯性。"
+                       if is_review else "填写支持 WAV 音频输入的 Chat Completions 接口。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         form = QFormLayout()
         layout.addLayout(form)
-        self.url = QLineEdit(os.environ.get("NOTEFLOW_REVIEW_BASE_URL") or settings.value("review/base_url", "", str))
-        self.url.setPlaceholderText("https://业务空间ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
-        self.model = QComboBox()
+        config, message = load_connection(settings)
+        self.url = QLineEdit(config.base_url)
+        self.url.setPlaceholderText("https://api.example.com/v1")
+        self.model = ComboBox()
         self.model.setEditable(True)
         self.model.addItems([DEFAULT_MODEL, "qwen3.5-omni-plus", "qwen3.5-omni-flash", "qwen3-omni-flash"])
-        self.model.setCurrentText(os.environ.get("NOTEFLOW_REVIEW_MODEL") or settings.value("review/model", DEFAULT_MODEL, str))
-        self.key = QLineEdit(api_key or os.environ.get("DASHSCOPE_API_KEY", ""))
+        self.model.setCurrentText(config.model)
+        self.protocol = ComboBox()
+        for label, protocol in (("自动（按服务地址）", "auto"), ("OpenAI 兼容（Base64）", "openai"),
+                                ("百炼兼容（Data URI）", "dashscope")):
+            self.protocol.addItem(label, protocol)
+        self.protocol.setCurrentIndex(max(0, self.protocol.findData(config.protocol)))
+        self.key = QLineEdit(config.api_key)
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.key.setPlaceholderText("仅本次打开软件期间保留，不写入项目或设置文件")
-        for label, control in (("百炼 Base URL", self.url), ("音频模型", self.model), ("API Key", self.key)):
+        self.key.setPlaceholderText("填写服务商提供的 API Key")
+        self._restored_key_url = config.base_url if config.api_key else ""
+        self.url.textChanged.connect(self._endpoint_changed)
+        self.key.textEdited.connect(self._key_edited)
+        for label, control in (("Base URL", self.url), ("音频模型", self.model),
+                               ("接口格式", self.protocol), ("API Key", self.key)):
             control.setMinimumHeight(36)
             control.setAccessibleName(label)
             form.addRow(label, control)
-        hint = QLabel('在 <a style="color:#b7c4ff" href="https://bailian.console.aliyun.com/">百炼控制台</a> 复制 Base URL 与同地域的 Key。'
-                      ' <a style="color:#b7c4ff" href="https://help.aliyun.com/zh/model-studio/qwen-omni">接口说明</a>')
-        hint.setOpenExternalLinks(True)
+        hint = QLabel("配置保存在本机，API Key 由当前 Windows 用户加密。清空 Key 后保存可移除凭据。")
         hint.setWordWrap(True)
         form.addRow(hint)
+
+        if is_review:
+            self._add_review_options(form, duration)
+            notice = QLabel("开始后，所选范围的原曲与演奏片段将发送到填写的服务地址，按服务商规则计费。\n"
+                            "每 20 秒分段，对照请求也计入次数。能力检查上传内置旋律，最多请求 6 次。")
+            notice.setWordWrap(True)
+            layout.addWidget(notice)
+        self.error = QLabel(message)
+        self.error.setTextFormat(Qt.TextFormat.PlainText)
+        self.error.setWordWrap(True)
+        self.error.setAccessibleName("配置提示")
+        layout.addWidget(self.error)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        cancel = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        cancel.setText("取消")
+        cancel.setMinimumHeight(36)
+        buttons.rejected.connect(self.reject)
+        save = buttons.addButton("仅保存配置" if is_review else "保存", QDialogButtonBox.ButtonRole.ActionRole)
+        save.clicked.connect(self.save)
+        if not is_review:
+            save.setObjectName("primary")
+        if is_review:
+            self.start_button = buttons.addButton("上传并开始复核", QDialogButtonBox.ButtonRole.AcceptRole)
+            self.start_button.setObjectName("primary")
+            self.start_button.setMinimumHeight(36)
+            calibration = buttons.addButton("检查复核能力（6 次）", QDialogButtonBox.ButtonRole.ActionRole)
+            calibration.setMinimumHeight(36)
+            calibration.setToolTip("上传内置的已知旋律及错音、错八度和断奏样本，最多请求 6 次")
+            calibration.clicked.connect(lambda: self.submit(calibration=True))
+            # Uploads require activating their named button rather than pressing Enter in a field.
+            self.start_button.setAutoDefault(False)
+            buttons.accepted.connect(self.submit)
+        save.setDefault(True)
+        save.setMinimumHeight(36)
+        layout.addWidget(buttons)
+
+    def _endpoint_changed(self, text):
+        if self._restored_key_url and text.strip().rstrip("/") != self._restored_key_url:
+            self.key.clear()
+            self._restored_key_url = ""
+            self.error.setText("服务地址已修改，请填写新地址对应的 API Key。")
+
+    def _key_edited(self):
+        self._restored_key_url = ""
+
+    def _add_review_options(self, form, duration):
         interval = QHBoxLayout()
         self.start, self.end = QDoubleSpinBox(), QDoubleSpinBox()
         for label, control in (("复核开始秒数", self.start), ("复核结束秒数", self.end)):
@@ -79,43 +136,33 @@ class ReviewDialog(QDialog):
             control.setMinimumHeight(36)
             control.setAccessibleName(label)
             form.addRow(label, control)
-        notice = QLabel("开始后，所选范围的原曲与演奏片段将发送到上述阿里云接口，按服务商规则计费。\n"
-                        "长片段每 20 秒分段；交换顺序的对照也计入请求次数。请求上限不是金额上限。\n"
-                        "“检查复核能力”仅上传内置测试旋律，固定最多 6 次请求，不修改当前乐谱。\n"
-                        "“复核通过”仅表示模型未发现明显问题，不代表准确率。")
-        notice.setWordWrap(True)
-        layout.addWidget(notice)
-        self.error = QLabel()
-        self.error.setTextFormat(Qt.TextFormat.PlainText)
-        self.error.setWordWrap(True)
-        self.error.setAccessibleName("配置提示")
-        layout.addWidget(self.error)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        self.start_button = buttons.addButton("上传并开始复核", QDialogButtonBox.ButtonRole.AcceptRole)
-        self.start_button.setObjectName("primary")
-        self.start_button.setMinimumHeight(36)
-        calibration = buttons.addButton("检查复核能力（6 次）", QDialogButtonBox.ButtonRole.ActionRole)
-        calibration.setMinimumHeight(36)
-        calibration.setToolTip("仅上传内置的已知旋律及错音、错八度、断奏样本，进行6次请求；不上传当前原曲")
-        calibration.clicked.connect(lambda: self.submit(calibration=True))
-        buttons.accepted.connect(self.submit)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+
+    def _connection(self):
+        return CloudConfig(self.url.text().strip().rstrip("/"), self.model.currentText().strip(),
+                           self.key.text().strip(), self.protocol.currentData())
+
+    def save(self):
+        try:
+            config = self._connection()
+            config.validate(require_key=False)
+            save_connection(self.settings, config)
+        except ValueError as error:
+            self.error.setText(str(error))
+            return
+        self.accept()
 
     def submit(self, *, calibration=False):
         try:
-            config = QwenConfig(self.url.text().strip().rstrip("/"), self.model.currentText().strip(), self.key.text().strip())
+            config = self._connection()
             config.validate()
             if not calibration and self.end.value() - self.start.value() < .1:
                 raise ValueError("请选择至少 0.1 秒的有效范围。")
+            save_connection(self.settings, config)
             self.request = ReviewRequest(config, ReviewLimits(self.rounds.value(), self.calls.value()),
                                          self.start.value(), min(self.end.value(), self.duration), calibration)
         except ValueError as error:
             self.error.setText(str(error))
             return
-        self.settings.setValue("review/base_url", config.base_url)
-        self.settings.setValue("review/model", config.model)
         self.accept()
 
 

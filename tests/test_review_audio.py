@@ -57,10 +57,10 @@ def test_review_service_uses_rendered_audio_local_repair_and_complete_final_revi
     import json
     import shutil
     from pathlib import Path
-    from noteflow import review_qwen
+    from noteflow import review_cloud
     from noteflow.analysis import AnalysisResult
     from noteflow.review import ReviewLimits, save_report
-    from noteflow.review_qwen import QwenConfig
+    from noteflow.review_cloud import CloudConfig
     from noteflow.review_service import review_score
     from noteflow.score import build_score
     tools = replace(_default_tools(), pitch_python="")
@@ -79,9 +79,9 @@ def test_review_service_uses_rendered_audio_local_repair_and_complete_final_revi
         with wave.open(io.BytesIO(audio)) as wav:
             calls.append(wav.getnframes() / wav.getframerate())
         return json.dumps(next(responses)), {"total_tokens": 100}
-    monkeypatch.setattr(review_qwen, "request", simulated_request)
+    monkeypatch.setattr(review_cloud, "request", simulated_request)
     result = review_score(AnalysisResult(media, 8, wrong), build_score(wrong, ScoreSettings()), tools,
-                          QwenConfig("https://dashscope.aliyuncs.com/compatible-mode/v1", api_key="test-only"),
+                          CloudConfig("https://dashscope.aliyuncs.com/compatible-mode/v1", api_key="test-only"),
                           tmp_path / "session", limits=ReviewLimits(), start_s=0, end_s=8)
     assert result.status == "passed" and result.notes[3].midi == clean[3].midi
     assert calls == [17, 26, 26, 17]

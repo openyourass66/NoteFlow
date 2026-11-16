@@ -13,7 +13,7 @@ from zipfile import BadZipFile, ZipFile, ZIP_DEFLATED, ZIP_STORED
 
 from .analysis import AnalysisResult
 from .errors import NoteFlowError
-from .export import PROGRAMS
+from .export import AUTO_INSTRUMENT, PROGRAMS
 from .media import MAX_SECONDS, MediaInfo, decode_original
 from .notes import NoteEvent
 from .options import AnalysisOptions, UncertainRegion
@@ -31,7 +31,7 @@ class Project:
     score: Score | None
     stems: Stems | None
     edited_notes: tuple[NoteEvent, ...] | None = None
-    instrument: str = "钢琴"
+    instrument: str = AUTO_INSTRUMENT
     vocal_score: bool = False
 
 
@@ -136,7 +136,7 @@ def load_project(path: Path, directory: Path, cancel: Event | None = None) -> Pr
             elif data["settings"] is not None or data["edited_notes"] is not None:
                 raise ValueError("Score without analysis")
             instrument = data["instrument"]
-            if instrument not in PROGRAMS:
+            if instrument != AUTO_INSTRUMENT and instrument not in PROGRAMS:
                 raise ValueError("Unknown instrument")
             stems = Stems(directory / "vocals.wav", directory / "accompaniment.wav") if data["stems"] else None
             check_cancelled(cancel)
