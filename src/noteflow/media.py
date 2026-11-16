@@ -1,7 +1,8 @@
-"""Probe local files and decode their first audio stream to PCM."""
+"""Probe local files and decode audio streams to PCM."""
 
 import json
 import math
+import re
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,11 @@ class AudioAsset:
     has_signal: bool
 
 
+def native_track_index(source: str) -> int | None:
+    match = re.fullmatch(r"native-([1-9][0-9]{0,5})", source)
+    return int(match[1]) - 2 if match and match[1] != "1" else None
+
+
 def _check_duration(duration: float, stage: str) -> None:
     if duration > MAX_SECONDS:
         raise NoteFlowError("INPUT_LIMIT", stage, f"音轨超过 {MAX_SECONDS} 秒，请截取片段后重试。")
@@ -47,6 +53,15 @@ def _known_duration(value) -> float | None:
 
 
 def probe(path: Path, ffprobe: str = "ffprobe", *, cancel: Event | None = None) -> MediaInfo:
+    return _probe(path, ffprobe, cancel, all_tracks=False)[0]
+
+
+def probe_tracks(path: Path, ffprobe: str = "ffprobe", *,
+                 cancel: Event | None = None) -> tuple[MediaInfo, ...]:
+    return _probe(path, ffprobe, cancel, all_tracks=True)
+
+
+def _probe(path: Path, ffprobe: str, cancel: Event | None, *, all_tracks: bool) -> tuple[MediaInfo, ...]:
     check_cancelled(cancel)
     try:
         path = path.resolve(strict=True)
@@ -71,26 +86,36 @@ def probe(path: Path, ffprobe: str = "ffprobe", *, cancel: Event | None = None) 
         demuxer = next((name for name in names if name in FORMATS), None)
         if demuxer is None:
             raise NoteFlowError("UNSUPPORTED_MEDIA", "probe", "文件的实际容器格式不受支持。")
-        track = next((stream for stream in metadata.get("streams", ()) if stream.get("codec_type") == "audio"), None)
-        if track is None:
+        tracks = [stream for stream in metadata.get("streams", ()) if stream.get("codec_type") == "audio"]
+        if not tracks:
             raise NoteFlowError("NO_AUDIO", "probe", "文件没有音轨，请选择包含音频的文件。")
-        index, codec = track["index"], track.get("codec_name", "")
-        if not isinstance(index, int) or index < 0 or not isinstance(codec, str):
-            raise ValueError("Invalid audio stream metadata")
-        duration = _known_duration(track.get("duration"))
-        # Container duration is a usable fallback for audio-only files.
-        if duration is None and demuxer != "mov":
-            duration = _known_duration(container.get("duration"))
+        playable = []
+        first_error = None
+        for track in tracks if all_tracks else tracks[:1]:
+            index, codec = track["index"], track.get("codec_name", "")
+            if not isinstance(index, int) or index < 0 or not isinstance(codec, str):
+                raise ValueError("Invalid audio stream metadata")
+            duration = _known_duration(track.get("duration"))
+            if duration is None and demuxer != "mov":
+                duration = _known_duration(container.get("duration"))
+            try:
+                expected_codec = FORMATS[demuxer]
+                supported = codec.startswith(expected_codec) if demuxer == "wav" else codec == expected_codec
+                if not supported:
+                    message = "音轨编码不受支持。" if all_tracks else "首条音轨的编码不受支持。"
+                    raise NoteFlowError("UNSUPPORTED_MEDIA", "probe", message)
+                if duration is not None:
+                    _check_duration(duration, "probe")
+            except NoteFlowError as error:
+                first_error = first_error or error
+                continue
+            playable.append(MediaInfo(path, index, codec, demuxer, duration))
+        if not playable:
+            raise first_error
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise NoteFlowError("DECODE_FAILED", "probe", "媒体探测返回了无效的音轨信息。") from exc
 
-    expected_codec = FORMATS[demuxer]
-    supported = codec.startswith(expected_codec) if demuxer == "wav" else codec == expected_codec
-    if not supported:
-        raise NoteFlowError("UNSUPPORTED_MEDIA", "probe", "首条音轨的编码不受支持。")
-    if duration is not None:
-        _check_duration(duration, "probe")
-    return MediaInfo(path, index, codec, demuxer, duration)
+    return tuple(playable)
 
 
 def _decode_pcm(info: MediaInfo, target: Path, ffmpeg: str, cancel: Event | None, *,

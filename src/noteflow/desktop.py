@@ -27,12 +27,12 @@ from .desktop_ui import build_interface, set_transport_paused
 from .errors import NoteFlowError
 from .export import AUTO_INSTRUMENT, GUZHENG_PROGRAM, PROGRAM_NAMES, PROGRAMS, export_score
 from .instruments import choose_program
-from .media import MEDIA_SUFFIXES, MediaInfo, decode_original, probe
+from .media import MEDIA_SUFFIXES, MediaInfo, decode_original, native_track_index, probe_tracks
 from .process import Cancelled, check_cancelled
 from .project import Project, load_project, save_project
 from .notes import NoteEvent
 from .score import Score, ScoreSettings, build_score, rekey
-from .separation import Stems, separate
+from .separation import STEM_LABELS, Stems, separate
 from .synthesis import render_preview
 from .review import STATUS_TEXT
 from .review_edit import apply_manual, load_report
@@ -49,7 +49,6 @@ class GeneratedScore:
     analysis: AnalysisResult
     score: Score
     from_vocals: bool = False
-    stems: Stems | None = None
     notice: str = ""
 
     @property
@@ -106,7 +105,9 @@ class MainWindow(QMainWindow):
         self.workspace = TemporaryDirectory(prefix="session-", dir=cache, ignore_cleanup_errors=True)
         self.workdir = Path(self.workspace.name)
         self.media = self.analysis = self.score = None
-        self.stems = self._stem_workspace = None
+        self.stems: Stems | None = None
+        self._stem_workspace = None
+        self.native_tracks = ()
         self._project_workspace = self._loading_workspace = None
         self.project_path = None
         self.source_name = ""
@@ -149,7 +150,7 @@ class MainWindow(QMainWindow):
         busy, ready = self._thread is not None, self.score is not None
         has_media = self.media is not None
         media_ready = not busy and has_media
-        export_ready = not busy and (ready or self.stems is not None)
+        export_ready = not busy and (ready or self.stems is not None or bool(self.native_tracks))
         self.pages.setCurrentWidget(self.editor_page if has_media else self.start_page)
         self.workflow_actions.setVisible(has_media)
         self.toolbar_spacer.setVisible(not has_media)
@@ -164,11 +165,12 @@ class MainWindow(QMainWindow):
         self.review_button.setToolTip("继续查看上次复核结果" if has_review else "对照原曲和演奏进行云端复核")
         self.review_report_action.setEnabled(self._review_result is not None and not busy)
         self.review_import_action.setEnabled(ready and not busy)
-        self.generate_button.setEnabled(media_ready)
+        selected = self.analysis_input.currentData()
+        self.generate_button.setEnabled(media_ready and selected is not None)
+        self.preview_track_button.setEnabled(media_ready and selected is not None)
         self.open_project_button.setEnabled(not self._closing)
         self.save_button.setEnabled(media_ready)
         self.save_as_action.setEnabled(media_ready)
-        self.source_mode.setEnabled(media_ready)
         self.analysis_input.setEnabled(media_ready)
         self.pitch_range.setEnabled(media_ready)
         self.recent_menu.menuAction().setEnabled(not self._closing)
@@ -181,9 +183,9 @@ class MainWindow(QMainWindow):
         self.export_button.setEnabled(export_ready)
         self.audio_export_action.setEnabled(export_ready)
         self.original_button.setEnabled(not busy and self.media is not None)
-        self.separate_button.setEnabled(not busy and self.media is not None and self.stems is None)
-        for control in (self.vocals_button, self.accompaniment_button):
-            control.setEnabled(not busy and self.stems is not None)
+        needs_split = not self.native_tracks and (self.stems is None or self.stems.other is None)
+        self.separate_button.setEnabled(media_ready and needs_split)
+        self.separate_button.setVisible(needs_split)
         self.cancel_button.setEnabled(busy and not self._cancel.is_set())
         self.cancel_button.setVisible(busy)
         for control in (self.bpm, self.offset, self.key, self.calibration_toggle, self.apply_button,
@@ -255,11 +257,12 @@ class MainWindow(QMainWindow):
             return
         if (cancelled and not (keep_cancelled and value is not None)) or isinstance(error, Cancelled):
             self._remove_preview()
-            self._status("任务已取消，可以重试。")
+            self._status("分轨已取消，可选原曲或重试。" if callback == self._tracks_ready
+                         else "任务已取消，可以重试。")
         elif error:
             self._remove_preview()
             LOG.warning("%s %s", error.stage, error.code)
-            self._status(str(error))
+            self._status(f"{error} 可选原曲或重试。" if callback == self._tracks_ready else str(error))
         else:
             callback(value)
         self._sync_controls()
@@ -370,11 +373,7 @@ class MainWindow(QMainWindow):
         self._status(f"已定位 {issue.start_s:.2f}–{issue.end_s:.2f} 秒。")
 
     def _review_stem(self):
-        options = self.analysis.options
-        use_stem = options.source == "separated" or (options.source == "auto" and options.target == "vocal")
-        if use_stem and self.stems:
-            return self.stems.vocals if options.target == "vocal" else self.stems.accompaniment
-        return None
+        return self.stems.tracks().get(self.analysis.options.track) if self.stems else None
 
     def choose_review_report(self):
         if self.score is None or self._thread is not None:
@@ -465,16 +464,46 @@ class MainWindow(QMainWindow):
             return
         self._stop_player()
         ffprobe = self.tools.ffprobe
-        self._start("正在检查音轨…", lambda cancel, _: probe(source, ffprobe, cancel=cancel), self._imported)
+        self._start("正在检查音轨…", lambda cancel, _: probe_tracks(source, ffprobe, cancel=cancel), self._imported)
 
-    def _imported(self, media):
+    def _imported(self, tracks):
         self._clear_session()
-        self.media = media
-        self._playhead_ms = 0
-        self.source_name = media.path.name
+        self.media, *native_tracks = tracks
+        self.native_tracks = tuple(native_tracks)
+        self.source_name = self.media.path.name
         self._update_title()
-        self._show_media(media.duration_s)
-        self._status("音轨已导入。")
+        self._show_media(self.media.duration_s)
+        self._refresh_tracks()
+        if self.native_tracks:
+            self._status(f"发现 {len(tracks)} 条音轨，选择后可试听或生成简谱。")
+        elif self.tools.demucs_python:
+            self.separate_tracks()
+        else:
+            self._status("可选择原曲。识别分轨需要在工具设置中配置 Demucs。")
+
+    def _refresh_tracks(self, selected=None):
+        picker = self.analysis_input
+        picker.blockSignals(True)
+        picker.clear()
+        picker.addItem("选择音轨")
+        original_label = "音轨 1" if self.native_tracks else "原曲"
+        self.original_button.setText(original_label)
+        self.original_button.setAccessibleName(f"播放{original_label}")
+        self.original_button.setToolTip(self.original_button.accessibleName())
+        picker.addItem(original_label, "original")
+        for index, track in enumerate(self.native_tracks, 2):
+            picker.addItem(f"音轨 {index}", f"native-{index}")
+            detail = f"{track.duration_s:.2f} 秒" if track.duration_s is not None else "时长待确认"
+            picker.setItemData(picker.count() - 1, detail, Qt.ItemDataRole.ToolTipRole)
+        for name in self.stems.tracks() if self.stems else ():
+            picker.addItem(STEM_LABELS[name], name)
+        picker.setCurrentIndex(max(0, picker.findData(selected)))
+        picker.blockSignals(False)
+
+    def _track_changed(self):
+        if self.project_path is not None:
+            self._mark_dirty()
+        self._sync_controls()
 
     def _show_media(self, duration):
         length = f"{duration:.2f} 秒" if duration is not None else "时长待解码确认"
@@ -484,7 +513,8 @@ class MainWindow(QMainWindow):
         self.score_view.set_media_available(True)
 
     def generate(self):
-        if self.media is None or self._thread is not None:
+        selected = self.analysis_input.currentData()
+        if self.media is None or self._thread is not None or selected is None:
             return
         self._stop_player()
         if self._edited_notes is not None and QMessageBox.question(
@@ -492,24 +522,25 @@ class MainWindow(QMainWindow):
         ) != QMessageBox.StandardButton.Yes:
             return
         media, tools, workdir, existing_stems = self.media, self.tools, self.workdir, self.stems
+        native_tracks = self.native_tracks
         minimum, maximum = self.pitch_range.currentData()
-        options = AnalysisOptions(self.source_mode.currentData(), minimum, maximum, self.analysis_input.currentData())
-        destination = None
-        if existing_stems is None and (options.source == "separated" or
-                                      (options.source == "auto" and options.target == "vocal")):
-            destination = self._prepare_stems()
+        if selected == "bass" and minimum == 36:
+            minimum = 21
+        vocal = selected == "vocals" or (selected == "original" and self.analysis is not None
+                                        and self._analysis_vocals and self._review_stem() is None)
+        options = AnalysisOptions("vocal" if vocal else "instrument", minimum, maximum, selected)
         self._revision += 1
         revision = self._revision
 
         def generate(cancel, progress):
-            result = run_pipeline(media, options, ffmpeg=tools.ffmpeg, demucs_python=tools.demucs_python,
-                                  pitch_python=tools.pitch_python, stems=existing_stems, destination=destination,
+            result = run_pipeline(media, options, ffmpeg=tools.ffmpeg, native_tracks=native_tracks,
+                                  pitch_python=tools.pitch_python, stems=existing_stems,
                                   workdir=workdir, cancel=cancel, progress=progress)
             analysis = result.analysis
             progress("正在生成简谱…")
             score = build_score(analysis.notes, ScoreSettings(analysis.beat.bpm, analysis.beat.first_beat_s), revision)
             notice = f"有 {len(analysis.uncertain)} 处音高证据偏弱，可在音符编辑中对照试听。" if analysis.uncertain else ""
-            return GeneratedScore(analysis, score, options.target == "vocal", result.stems, notice)
+            return GeneratedScore(analysis, score, options.target == "vocal", notice)
 
         self._start("正在生成简谱…", generate, self._generated)
 
@@ -517,10 +548,6 @@ class MainWindow(QMainWindow):
         self._review_result = None
         self._auto_program = None
         self.analysis = result.analysis
-        if result.stems is not None:
-            self.stems = result.stems
-        elif self.stems is None:
-            self._clear_stems()
         self._edited_notes = None
         self._undo.clear()
         self._redo.clear()
@@ -539,7 +566,8 @@ class MainWindow(QMainWindow):
         self.bpm.setValue(score.settings.bpm)
         self.offset.setValue(score.settings.first_beat_s)
         self.key.setCurrentIndex(score.settings.tonic_pc)
-        source = "人声主旋律" if self._analysis_vocals else "乐器主旋律"
+        index = self.analysis_input.findData(self.analysis.options.track)
+        source = self.analysis_input.itemText(index) if index >= 0 else "原曲"
         message = f"{source}简谱，{len(score.measures)} 小节，{len(score.grid.notes)} 个音符。"
         if not calibrated:
             message += "拍点证据不足，当前使用 120 BPM，请手动校准。"
@@ -567,15 +595,19 @@ class MainWindow(QMainWindow):
     def play_original(self):
         if self.media is None or self._thread is not None:
             return
+        self._play_media(self.media, self.original_button.text())
+
+    def _play_media(self, media, label):
         self._stop_player()
-        media, ffmpeg = self.media, self.tools.ffmpeg
+        ffmpeg = self.tools.ffmpeg
         target = self.workdir / f"original-{uuid4().hex}.wav"
         self._preview_path = target
-        self._start("正在准备原曲音轨…", lambda cancel, _: decode_original(media, target, ffmpeg, cancel),
-                    lambda path: self._play_rendered(path, "原曲"))
+        self._start(f"正在准备{label}…", lambda cancel, _: decode_original(media, target, ffmpeg, cancel),
+                    lambda path: self._play_rendered(path, label))
 
     def separate_tracks(self):
-        if self.media is None or self.stems is not None or self._thread is not None:
+        if (self.media is None or self.native_tracks or self._thread is not None
+                or (self.stems is not None and self.stems.other is not None)):
             return
         if not self.tools.demucs_python:
             self._status("请先在工具设置中选择已安装 Demucs 的 Python。")
@@ -586,22 +618,27 @@ class MainWindow(QMainWindow):
             return
         self._stop_player()
         media, tools = self.media, self.tools
-        self._start("正在分离人声与伴奏，首次运行会下载模型…",
+        self._start("正在识别人声、贝斯、鼓和其他乐器，首次运行会下载模型…",
                     lambda cancel, _: separate(media, destination, python=tools.demucs_python,
-                                               ffmpeg=tools.ffmpeg, cancel=cancel),
+                                               ffmpeg=tools.ffmpeg, cancel=cancel, full=True),
                     self._tracks_ready)
 
     def _prepare_stems(self) -> Path | None:
         try:
-            self._stem_workspace = TemporaryDirectory(prefix="tracks-", dir=self.workdir, ignore_cleanup_errors=True)
+            if self._stem_workspace is None:
+                self._stem_workspace = TemporaryDirectory(prefix="tracks-", dir=self.workdir, ignore_cleanup_errors=True)
         except OSError:
             return None
-        return Path(self._stem_workspace.name) / "stems"
+        return Path(self._stem_workspace.name) / f"stems-{uuid4().hex}"
 
     def _tracks_ready(self, stems):
+        if self.stems is not None:
+            stems = replace(stems, vocals=self.stems.vocals, accompaniment=self.stems.accompaniment)
         self.stems = stems
-        self._mark_dirty()
-        self._status("人声与伴奏已分离，可以分别试听。提取目标保持不变。")
+        self._refresh_tracks(self.analysis_input.currentData())
+        if self.project_path is not None:
+            self._mark_dirty()
+        self._status("分轨已就绪，选择要识别的音轨，可先试听再生成简谱。")
 
     def _clear_stems(self):
         self.stems = None
@@ -609,18 +646,27 @@ class MainWindow(QMainWindow):
             self._stem_workspace.cleanup()
             self._stem_workspace = None
 
-    def play_stem(self, *, vocals):
-        if self.stems is None or self._thread is not None:
+    def play_selected_track(self):
+        selected = self.analysis_input.currentData()
+        if selected is None or self._thread is not None:
+            return
+        if selected == "original":
+            self.play_original()
+            return
+        label = self.analysis_input.currentText()
+        native_index = native_track_index(selected)
+        if native_index is not None:
+            self._play_media(self.native_tracks[native_index], label)
             return
         self._stop_player()
-        path, label = (self.stems.vocals, "人声") if vocals else (self.stems.accompaniment, "伴奏")
-        self._play_rendered(path, label)
+        self._play_rendered(self.stems.tracks()[selected], label)
         self._sync_controls()
 
     def _instrument_task(self):
         name = self.instrument.currentText()
         selected = self._auto_program if name == AUTO_INSTRUMENT else (PROGRAMS[name], True)
-        score, media, tools, workdir = self.score, self.media, self.tools, self.workdir
+        score, tools, workdir = self.score, self.tools, self.workdir
+        media = self.analysis.media if self.analysis is not None else self.media
         stem = self._review_stem() if self.analysis is not None else None
         if stem is not None:
             media = MediaInfo(stem, 0, "pcm_s16le", "wav")
@@ -630,7 +676,7 @@ class MainWindow(QMainWindow):
                 return selected
             if not tools.soundfont or score is None or not score.melody:
                 return 0, False
-            progress("正在匹配原曲主旋律音色…")
+            progress("正在匹配旋律音色…")
             return choose_program(media, score.melody, Path(tools.soundfont).resolve(),
                                   tools.ffmpeg, tools.fluidsynth, workdir, cancel)
 
@@ -817,6 +863,7 @@ class MainWindow(QMainWindow):
             self._project_workspace.cleanup()
             self._project_workspace = None
         self.media = self.analysis = self.score = self.project_path = None
+        self.native_tracks = ()
         self._auto_program = None
         self.instrument.setCurrentText(AUTO_INSTRUMENT)
         self._review_result = None
@@ -824,8 +871,9 @@ class MainWindow(QMainWindow):
         self._undo.clear()
         self._redo.clear()
         self._dirty = self._analysis_vocals = False
-        self.source_mode.setCurrentIndex(0)
-        self.analysis_input.setCurrentIndex(0)
+        self._refresh_tracks()
+        while self.pitch_range.count() > 3:
+            self.pitch_range.removeItem(3)
         self.pitch_range.setCurrentIndex(0)
         self.source_label.hide()
         self.calibration_toggle.setChecked(False)
@@ -876,15 +924,17 @@ class MainWindow(QMainWindow):
             self._clear_session()
             self._project_workspace, self._loading_workspace = self._loading_workspace, None
             self.media, self.analysis, self.stems = project.media, project.analysis, project.stems
+            self.native_tracks = project.native_tracks
             self.source_name = project.name
             self.project_path = path.resolve()
             self._edited_notes = project.edited_notes
             self._analysis_vocals = project.vocal_score
             self.instrument.setCurrentText(project.instrument)
             options = project.analysis.options if project.analysis else AnalysisOptions()
-            self.source_mode.setCurrentIndex(self.source_mode.findData(options.target))
-            self.analysis_input.setCurrentIndex(self.analysis_input.findData(options.source))
+            self._refresh_tracks(project.selected_track)
             pitch_range = (options.pitch_min, options.pitch_max)
+            if options.track == "bass" and pitch_range in ((21, 96), (21, 72)):
+                pitch_range = (36, options.pitch_max)
             index = next((i for i in range(self.pitch_range.count())
                           if tuple(self.pitch_range.itemData(i)) == pitch_range), -1)
             if index < 0:
@@ -894,7 +944,7 @@ class MainWindow(QMainWindow):
             if project.score:
                 self._publish_score(project.score)
             self._dirty = False
-            self._show_media(self.media.duration_s)
+            self._show_media(self.analysis.duration_s if self.analysis else self.media.duration_s)
             self._update_title()
             self._remember_project(path)
             self._status("项目已恢复，可以继续编辑和试听。")
@@ -919,7 +969,8 @@ class MainWindow(QMainWindow):
             if path.exists() and QMessageBox.question(self, "覆盖项目", f"覆盖 {path.name}？") != QMessageBox.StandardButton.Yes:
                 return
         project = Project(self.source_name, self.media, self.analysis, self.score, self.stems,
-                          self._edited_notes, self.instrument.currentText(), self._analysis_vocals)
+                          self._edited_notes, self.instrument.currentText(), self._analysis_vocals,
+                          self.native_tracks, self.analysis_input.currentData())
 
         def saved(_):
             self.project_path = path.resolve()
@@ -1099,9 +1150,10 @@ class MainWindow(QMainWindow):
     def export_audio(self):
         if self._thread is not None:
             return
-        choices = []
-        if self.stems:
-            choices.extend(("人声", "伴奏"))
+        stems = {STEM_LABELS[name]: path for name, path in self.stems.tracks().items()} if self.stems else {}
+        native = ({f"音轨 {index}": media for index, media in enumerate((self.media, *self.native_tracks), 1)}
+                  if self.native_tracks else {})
+        choices = [*stems, *native]
         if self.score and self.score.melody:
             choices.append("演奏")
         if not choices:
@@ -1120,15 +1172,17 @@ class MainWindow(QMainWindow):
             path = Path(str(path) + ".wav")
         if path.exists() and QMessageBox.question(self, "覆盖文件", f"覆盖 {path.name}？") != QMessageBox.StandardButton.Yes:
             return
-        score, stems, tools = self.score, self.stems, self.tools
+        score, tools = self.score, self.tools
         resolve = self._instrument_task() if kind == "演奏" else None
 
         def write(cancel, progress):
             choice = resolve(cancel, progress) if resolve else None
             with TemporaryDirectory(prefix="export-", dir=path.parent) as directory:
                 target = Path(directory) / "audio.wav"
-                if kind in ("人声", "伴奏"):
-                    shutil.copyfile(stems.vocals if kind == "人声" else stems.accompaniment, target)
+                if kind in stems:
+                    shutil.copyfile(stems[kind], target)
+                elif kind in native:
+                    decode_original(native[kind], target, tools.ffmpeg, cancel)
                 else:
                     render_preview(score, choice[0], Path(tools.soundfont), target, tools.fluidsynth,
                                    cancel, original_timing=True)
@@ -1145,8 +1199,8 @@ class MainWindow(QMainWindow):
 
     def show_help(self):
         QMessageBox.information(self, "使用说明",
-            "1. 导入音频或视频，选择乐器或人声主旋律，再生成简谱。\n"
-            "2. 自动选源：乐器使用原曲，人声先分离。也可直接识别清唱或独奏。\n"
+            "1. 导入音频或视频。多轨文件会列出音轨，单轨文件可用 Demucs 自动分轨。\n"
+            "2. 选择音轨，试听后点击「生成简谱」。清唱或独奏可直接选原曲。\n"
             "3. 在音符编辑页修正音高、起止时间和力度，Ctrl+Z 可撤销。\n"
             "4. 演奏保留原始节奏，音色默认匹配原曲，也可手动选择；点击音符可定位。\n"
             "5. Ctrl+S 保存项目。项目包含原曲、分轨和音符，可离线恢复。\n"

@@ -50,7 +50,7 @@ def run_tool(command: str, stage: str, timeout: int, args: tuple[str, ...], canc
                 if stage == "pitch":
                     raise NoteFlowError(code, stage, "音高复核失败，请检查推理环境是否安装 torchcrepe，或在工具设置中停用该环境。")
                 if stage == "separate":
-                    raise NoteFlowError(code, stage, "人声分离失败，请检查 Demucs 环境和首次下载模型所需的网络。")
+                    raise NoteFlowError(code, stage, "分轨失败，请检查 Demucs 环境和首次下载模型所需的网络。")
                 raise NoteFlowError(code, stage, f"{Path(command).name} 处理失败，请检查输入文件和工具版本。")
     except OSError as exc:
         raise NoteFlowError(code, stage, f"无法运行 {Path(command).name}。") from exc

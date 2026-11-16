@@ -47,7 +47,7 @@ def wait_for(app, condition, timeout=100):
 def window(app, tmp_path, monkeypatch):
     import shutil
 
-    tools = replace(_default_tools(), pitch_python="")
+    tools = replace(_default_tools(), pitch_python="", demucs_python="")
     if not shutil.which(tools.ffmpeg) or not shutil.which(tools.ffprobe):
         pytest.skip("Desktop tests require FFmpeg and ffprobe")
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
@@ -59,6 +59,12 @@ def window(app, tmp_path, monkeypatch):
     wait_for(app, lambda: window._thread is None and not window.isVisible())
 
 
+def select_track(window, track):
+    index = window.analysis_input.findData(track)
+    assert index >= 0
+    window.analysis_input.setCurrentIndex(index)
+
+
 def test_toolbar_preserves_file_shortcuts_and_recent_projects(app, tmp_path, monkeypatch):
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     recent = tmp_path / "曲目 & 项目.noteflow"
@@ -66,7 +72,7 @@ def test_toolbar_preserves_file_shortcuts_and_recent_projects(app, tmp_path, mon
     opened = []
     monkeypatch.setattr(desktop.MainWindow, "open_source", lambda self, path: opened.append(Path(path)))
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **kw: (str(recent), ""))
-    window = desktop.MainWindow(tmp_path, settings=settings)
+    window = desktop.MainWindow(tmp_path, settings=settings, tools=replace(_default_tools(), demucs_python=""))
     window.show()
     window.activateWindow()
     app.processEvents()
@@ -80,7 +86,7 @@ def test_toolbar_preserves_file_shortcuts_and_recent_projects(app, tmp_path, mon
         action.trigger()
         window.recent_list.itemActivated.emit(window.recent_list.item(0))
         assert opened == [recent, recent, recent]
-        window._imported(MediaInfo(tmp_path / "音轨.wav", 0, "pcm_s16le", "wav", 2))
+        window._imported((MediaInfo(tmp_path / "音轨.wav", 0, "pcm_s16le", "wav", 2),))
         window._sync_controls()
         assert window.editor_page.isVisible()
         assert not window.start_page.isVisible()
@@ -100,7 +106,7 @@ def test_audio_review_applies_checkpoint_and_can_undo_even_when_cancelled(app, w
     media = MediaInfo(tmp_path / "source.wav", 0, "pcm_s16le", "wav", 2)
     baseline = (NoteEvent("lead", .1, 1, 62, .7, 80),)
     fixed = (replace(baseline[0], midi=60),)
-    window._imported(media)
+    window._imported((media,))
     analysis = AnalysisResult(media, 2, baseline)
     window._generated(desktop.GeneratedScore(analysis, build_score(baseline, ScoreSettings())))
     config = CloudConfig("https://dashscope.aliyuncs.com/compatible-mode/v1", api_key="test-key")
@@ -181,7 +187,7 @@ def test_auto_timbre_is_used_by_playback_and_export_with_manual_override(app, wi
 
     media = MediaInfo(tmp_path / "source.wav", 0, "pcm_s16le", "wav", 2)
     notes = (NoteEvent("lead", .1, 1, 62, .7, 80),)
-    window._imported(media)
+    window._imported((media,))
     window._generated(desktop.GeneratedScore(AnalysisResult(media, 2, notes), build_score(notes, ScoreSettings())))
     window.tools = replace(window.tools, soundfont=str(tmp_path / "test.sf2"))
     detected, rendered = [], []
@@ -320,7 +326,7 @@ def test_review_results_rebuild_audition_apply_undo_and_import(app, window, tmp_
     path = tmp_path / "saved-review.json"
     save_report(result, path)
     original_file = path.read_bytes()
-    window._imported(media)
+    window._imported((media,))
     window._generated(desktop.GeneratedScore(AnalysisResult(media, 2, baseline), build_score(baseline, ScoreSettings())))
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a: (str(path), ""))
     window.choose_review_report()
@@ -387,6 +393,8 @@ def test_desktop_generates_calibrates_and_exports(app, window, tmp_path, monkeyp
     write_wave(source, 10, melody())
     window.open_source(source)
     wait_for(app, lambda: window._thread is None)
+    assert not window.generate_button.isEnabled()
+    select_track(window, "original")
     assert window.generate_button.isEnabled()
     window.generate_button.click()
     wait_for(app, lambda: window._thread is None)
@@ -484,29 +492,29 @@ def test_desktop_can_preview_stems_and_transcribe_only_vocals(app, window, tmp_p
     write_wave(source, 10, [(0, 9, 43)])
     window.tools = replace(window.tools, demucs_python="test-python")
 
-    def separate(media, destination, **_):
+    def separate(media, destination, *, full, **_):
         assert media.path == source
+        assert full
         destination.mkdir()
-        vocals, accompaniment = destination / "vocals.wav", destination / "no_vocals.wav"
-        write_wave(vocals, 10, expected)
-        write_wave(accompaniment, 10, [(0, 9, 43)])
-        return Stems(vocals, accompaniment)
+        tracks = {name: destination / f"{name}.wav" for name in desktop.STEM_LABELS}
+        for name, path in tracks.items():
+            write_wave(path, 10, expected if name in ("vocals", "other") else [(0, 9, 43)])
+        return Stems(**tracks)
 
     monkeypatch.setattr(desktop, "separate", separate)
     played = []
     monkeypatch.setattr(window, "_play_rendered", lambda path, label: played.append((path, label)))
     window.open_source(source)
     wait_for(app, lambda: window._thread is None)
-    assert not window.vocals_button.isEnabled()
-    window.separate_button.click()
-    wait_for(app, lambda: window._thread is None)
     assert window.stems is not None, window.status.text()
+    assert not window.generate_button.isEnabled() and not window.preview_track_button.isEnabled()
     stems = window.stems
-    window.vocals_button.click()
-    window.accompaniment_button.click()
-    assert played == [(stems.vocals, "人声"), (stems.accompaniment, "伴奏")]
+    for track in ("vocals", "bass", "drums", "other", "accompaniment"):
+        select_track(window, track)
+        window.preview_track_button.click()
+    assert played == [(path, desktop.STEM_LABELS[name]) for name, path in stems.tracks().items()]
 
-    window.source_mode.setCurrentIndex(window.source_mode.findData("vocal"))
+    select_track(window, "vocals")
     window.generate_button.click()
     wait_for(app, lambda: window._thread is None)
     assert window.score is not None, window.status.text()
@@ -524,7 +532,7 @@ def test_desktop_can_preview_stems_and_transcribe_only_vocals(app, window, tmp_p
     project = tmp_path / "stems.noteflow"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (str(project), ""))
     # Real separation writes aligned stereo PCM stems.
-    for path in (stems.vocals, stems.accompaniment):
+    for path in stems.tracks().values():
         with wave.open(str(path), "rb") as wav:
             samples = wav.readframes(wav.getnframes())
         import numpy as np
@@ -540,16 +548,18 @@ def test_desktop_can_preview_stems_and_transcribe_only_vocals(app, window, tmp_p
     window.open_source(project)
     wait_for(app, lambda: window._thread is None)
     assert window.stems is not None and window.stems.vocals.exists(), window.status.text()
-    assert window._analysis_vocals and window.source_mode.currentData() == "vocal"
+    assert window._analysis_vocals and window.analysis_input.currentData() == "vocals"
+    assert window.analysis.options.source == "vocals" and window._review_stem() == window.stems.vocals
+    assert window.stems.tracks().keys() == stems.tracks().keys()
     assert window.pitch_range.count() == 3 and window.pitch_range.currentIndex() == 0
     restored = window.stems
     window.open_source(source)
     wait_for(app, lambda: window._thread is None)
-    assert not window.vocals_button.isEnabled() and not restored.vocals.exists()
+    assert not window.preview_track_button.isEnabled() and not restored.vocals.exists()
 
 
-@pytest.mark.parametrize("mode", ["instrument", "vocal", "no_demucs", "failed"])
-def test_explicit_target_selects_the_input_and_never_falls_back_to_another_voice(app, window, tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize("mode", ["original", "bass", "no_demucs", "failed", "cancelled"])
+def test_transcription_waits_for_track_selection(app, window, tmp_path, monkeypatch, mode):
     source = tmp_path / "mixed.wav"
     write_wave(source, 3, [(0, 2.5, 40)])
     window.tools = replace(window.tools, demucs_python="" if mode == "no_demucs" else "test-python")
@@ -560,40 +570,94 @@ def test_explicit_target_selects_the_input_and_never_falls_back_to_another_voice
 
     def analyze(media, *, vocals, find_beats, melody_only, options, **_):
         assert melody_only and find_beats
-        analyzed.append(vocals)
+        analyzed.append((vocals, options))
         return AnalysisResult(media, 3, lead, beat, candidate_overlap=0.8, options=options)
 
-    def separate(media, destination, **_):
+    def separate(media, destination, *, cancel, **_):
         separated.append(destination)
         if mode == "failed":
             raise NoteFlowError("SEPARATION_FAILED", "separate", "测试分离失败。")
+        if mode == "cancelled" and len(separated) == 1:
+            cancel.wait(timeout=10)
+            check_cancelled(cancel)
         destination.mkdir()
-        stems = Stems(destination / "vocals.wav", destination / "no_vocals.wav")
-        stems.vocals.touch()
-        stems.accompaniment.touch()
-        return stems
+        return Stems(**{name: destination / f"{name}.wav" for name in desktop.STEM_LABELS})
 
     monkeypatch.setattr(pipeline, "analyze_media", analyze)
-    monkeypatch.setattr(pipeline, "separate", separate)
+    monkeypatch.setattr(desktop, "separate", separate)
     window.open_source(source)
+    if mode == "cancelled":
+        wait_for(app, lambda: bool(separated))
+        assert not window.generate_button.isEnabled()
+        window.cancel_button.click()
     wait_for(app, lambda: window._thread is None)
-    assert window.source_mode.currentData() == "instrument"
-    if mode != "instrument":
-        window.source_mode.setCurrentIndex(window.source_mode.findData("vocal"))
+    assert window.analysis_input.currentData() is None and not window.generate_button.isEnabled()
+    assert analyzed == []
+    if mode in {"failed", "no_demucs", "cancelled"}:
+        assert window._stem_workspace is None and window.separate_button.isEnabled()
+    if mode == "cancelled":
+        window.separate_button.click()
+        wait_for(app, lambda: window._thread is None)
+        assert len(separated) == 2 and window.stems is not None
+    selected = "bass" if mode == "bass" else "original"
+    select_track(window, selected)
     window.generate_button.click()
     wait_for(app, lambda: window._thread is None)
-    if mode in {"failed", "no_demucs"}:
-        assert window.score is None and analyzed == []
-        assert window._stem_workspace is None
-    elif mode == "vocal":
-        assert analyzed == [window.stems.vocals]
-        assert window._analysis_vocals and window.score.melody == lead
+    (path, options), = analyzed
+    assert options.source == selected and window.score.melody == lead and not window._analysis_vocals
+    if mode == "bass":
+        assert path == window.stems.bass and options.pitch_min == 21
         window.generate_button.click()
         wait_for(app, lambda: window._thread is None)
         assert len(separated) == 1
     else:
-        assert analyzed == [None] and separated == []
-        assert window.score.melody == lead and not window._analysis_vocals
+        assert path is None
+
+
+def test_native_tracks_are_selected_and_preserved_in_portable_projects(app, window, tmp_path, monkeypatch):
+    import subprocess
+    import wave
+
+    source, project = tmp_path / "two-tracks.mp4", tmp_path / "portable.noteflow"
+    first, second = tmp_path / "first.wav", tmp_path / "second.wav"
+    write_wave(first, 2, [(0, 1.8, 43)])
+    write_wave(second, 10, melody())
+    subprocess.run([window.tools.ffmpeg, "-nostdin", "-v", "error", "-i", str(first), "-i", str(second),
+                    "-map", "0:a", "-map", "1:a", "-c:a", "aac", str(source)], check=True, timeout=30)
+    window.tools = replace(window.tools, demucs_python="must-not-run")
+    window.open_source(source)
+    wait_for(app, lambda: window._thread is None)
+    assert len(window.native_tracks) == 1 and window.stems is None
+    assert not window.separate_button.isVisible() and not window.generate_button.isEnabled()
+    select_track(window, "native-2")
+    auditioned = []
+
+    def audition(path, label):
+        with wave.open(str(path), "rb") as wav:
+            auditioned.append((label, wav.getnframes() / wav.getframerate()))
+
+    monkeypatch.setattr(window, "_play_rendered", audition)
+    window.preview_track_button.click()
+    wait_for(app, lambda: window._thread is None)
+    (label, duration), = auditioned
+    assert label == "音轨 2" and duration == pytest.approx(10, abs=0.05)
+    window.generate()
+    wait_for(app, lambda: window._thread is None)
+    assert window.analysis.media.stream_index == 1
+    assert [note.midi for note in window.score.melody] == [pitch for _, _, pitch in melody()]
+    select_track(window, "original")
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **kw: (str(project), ""))
+    window.save_project()
+    wait_for(app, lambda: window._thread is None)
+    assert project.exists(), window.status.text()
+    source.unlink()
+    window.open_source(project)
+    wait_for(app, lambda: window._thread is None)
+    assert window.analysis_input.currentData() == "original"
+    assert window.analysis.options.source == "native-2"
+    assert window.analysis.media == window.native_tracks[0]
+    assert window.analysis.duration_s == pytest.approx(10, abs=0.05)
+    assert window.media.duration_s == pytest.approx(2, abs=0.05)
 
 
 def test_desktop_cancellation_and_source_changes_discard_late_results(app, window, tmp_path, monkeypatch):
@@ -611,6 +675,7 @@ def test_desktop_cancellation_and_source_changes_discard_late_results(app, windo
     monkeypatch.setattr(pipeline, "analyze_media", slow_analyze)
     window.open_source(sources[0])
     wait_for(app, lambda: window._thread is None)
+    select_track(window, "original")
     window.generate_button.click()
     wait_for(app, lambda: len(entered) == 1)
     window.cancel_button.click()
@@ -624,6 +689,7 @@ def test_desktop_cancellation_and_source_changes_discard_late_results(app, windo
     wait_for(app, lambda: window._thread is None)
     assert window.score is None and window.media.path == sources[2].resolve()
 
+    select_track(window, "original")
     window.generate_button.click()
     wait_for(app, lambda: len(entered) == 3)
     workspace = window.workdir
@@ -637,6 +703,7 @@ def test_project_restores_edited_notes_and_audio_after_original_is_removed(app, 
     write_wave(source, 10, melody())
     window.open_source(source)
     wait_for(app, lambda: window._thread is None)
+    select_track(window, "original")
     window.generate()
     wait_for(app, lambda: window._thread is None)
     original = window.score.melody
